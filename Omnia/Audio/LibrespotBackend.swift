@@ -3,20 +3,22 @@ import AVFoundation
 
 // MARK: - LibrespotBackend
 //
-// Manages Spotify audio playback via the Rust librespot binary.
+// Manages Spotify audio playback via a persistent Python daemon.
 //
 // Architecture:
-//   1. A small Python helper uses librespot-python to decrypt the selected track.
-//   2. sounddevice plays PCM locally, matching the proven Python implementation.
-//   3. The helper reports START/POS/END lines over stdout.
-//   4. Omnia sends pause/resume/seek/volume commands over stdin.
+//   1. startDaemon(accessToken:volume:) spawns the Python helper once and
+//      waits for the READY handshake (librespot session created).
+//   2. play(trackId:…) sends PLAY <trackId> <durationMs> to the daemon;
+//      the daemon streams OGG audio progressively via sounddevice.
+//   3. stop() sends STOP (keeps daemon alive for the next track).
+//   4. stopDaemon() sends QUIT + terminates the process (called on app close).
 
 @MainActor
 public final class LibrespotBackend {
 
     // MARK: - Callbacks
 
-    public var onPositionChanged: ((Int) -> Void)?   // ms
+    public var onPositionChanged: ((Int) -> Void)?
     public var onEndReached: (() -> Void)?
     public var onError: ((String) -> Void)?
     public var onPlaybackStarted: (() -> Void)?
@@ -24,17 +26,24 @@ public final class LibrespotBackend {
     // MARK: - Configuration
 
     public var deviceName: String = "Omnia"
-    public var bitrate: Int = 320          // 96 | 160 | 320
+    public var bitrate: Int = 320
 
-    // MARK: - Private state
+    // MARK: - Private state — Python env
 
     private let bridge: LibrespotBridge
-    private var process: Process?
-    private var audioEngine: AVAudioEngine?
-    private var playerNode: AVAudioPlayerNode?
-    private var streamTask: Task<Void, Never>?
-    private var positionTask: Task<Void, Never>?
+    private var helperPython: String?
+    private var helperPythonTask: Task<String?, Never>?
+
+    // MARK: - Private state — daemon process (persistent)
+
+    private var daemonProcess: Process?
     private var commandPipe: Pipe?
+    private var daemonOutputTask: Task<Void, Never>?
+    private var daemonStartTask: Task<Void, Error>?
+    private var daemonReadyContinuation: CheckedContinuation<Void, Error>?
+    private var isDaemonReady = false
+
+    // MARK: - Private state — current track
 
     private var sampleRate: Double = 44100
     private var framesPlayed: Int64 = 0
@@ -53,46 +62,46 @@ public final class LibrespotBackend {
 
     // MARK: - Public API
 
+    /// Pre-detect the Python runtime in the background so it's ready when
+    /// startDaemon() is called.
+    public func warmUpRuntime() {
+        guard helperPython == nil, helperPythonTask == nil else { return }
+        helperPythonTask = Task.detached {
+            Self.findSpotifyHelperPython()
+        }
+    }
+
+    /// Start the persistent daemon process. Waits for the READY handshake
+    /// (librespot session created). Safe to call multiple times — no-ops
+    /// if the daemon is already running.
+    public func startDaemon(accessToken: String, volume: Int) async {
+        // If a start is already in progress, wait for it instead of racing.
+        if let existing = daemonStartTask {
+            _ = try? await existing.value
+            return
+        }
+        // Already healthy — nothing to do.
+        if isDaemonReady, daemonProcess?.isRunning == true { return }
+
+        let task = Task<Void, Error> { [weak self] in
+            guard let self else { return }
+            try await self._doStartDaemon(accessToken: accessToken, volume: volume)
+        }
+        daemonStartTask = task
+        _ = try? await task.value
+        daemonStartTask = nil
+    }
+
+    /// Send a PLAY command to the daemon, starting a new track.
+    /// Starts (or restarts) the daemon if it is not running.
     public func play(trackId: String, accessToken: String, durationMs: Int = 0) async throws {
-        stop()
-        framesPlayed = 0
-        isPaused = false
-        playbackStartedAt = nil
-        playbackBaseMs = 0
-        playbackDurationMs = durationMs
-        didReachEnd = false
-        didStartPlayback = false
-        maxReportedPositionMs = 0
-        guard let python = findSpotifyHelperPython() else {
-            throw LibrespotBackendError.pythonNotFound
-        }
-        guard let helper = Bundle.module.path(forResource: "spotify_playback_helper", ofType: "py")
-                ?? Bundle.main.path(forResource: "spotify_playback_helper", ofType: "py") else {
-            throw LibrespotBackendError.helperNotFound
+        resetTrackState(durationMs: durationMs)
+
+        if !isDaemonReady || daemonProcess?.isRunning != true {
+            try await _doStartDaemon(accessToken: accessToken, volume: Int(volume * 100))
         }
 
-        let errPipe = Pipe()
-        let outPipe = Pipe()
-        let inPipe = Pipe()
-        let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: python)
-        proc.arguments = [
-            helper,
-            trackId,
-            accessToken,
-            String(Int(volume * 100)),
-        ]
-        proc.environment = ExecutableResolver.environmentWithExpandedPATH()
-        proc.standardInput = inPipe
-        proc.standardOutput = outPipe
-        proc.standardError  = errPipe
-        try proc.run()
-        process = proc
-        commandPipe = inPipe
-
-        streamTask = Task { [weak self] in
-            await self?.readHelperOutput(outPipe: outPipe, errPipe: errPipe)
-        }
+        sendCommand("PLAY \(trackId) \(durationMs)")
     }
 
     public func pause() {
@@ -105,24 +114,27 @@ public final class LibrespotBackend {
         sendCommand("RESUME")
     }
 
+    /// Stop the current track but keep the daemon alive for the next play.
     public func stop() {
-        streamTask?.cancel(); streamTask = nil
-        positionTask?.cancel(); positionTask = nil
-        sendCommand("STOP")
-        process?.terminate(); process = nil
+        resetTrackState(durationMs: 0)
+        if isDaemonReady, daemonProcess?.isRunning == true {
+            sendCommand("STOP")
+        }
+    }
+
+    /// Fully shut down the daemon (call from AppController.close()).
+    public func stopDaemon() {
+        daemonOutputTask?.cancel()
+        daemonOutputTask = nil
+        sendCommand("QUIT")
+        daemonProcess?.terminate()
+        daemonProcess = nil
         commandPipe = nil
-        playerNode?.stop()
-        audioEngine?.stop()
-        playerNode = nil
-        audioEngine = nil
-        framesPlayed = 0
-        isPaused = false
-        playbackStartedAt = nil
-        playbackBaseMs = 0
-        playbackDurationMs = 0
-        didReachEnd = false
-        didStartPlayback = false
-        maxReportedPositionMs = 0
+        isDaemonReady = false
+        // Unblock any in-progress startDaemon wait.
+        daemonReadyContinuation?.resume(throwing: LibrespotBackendError.sessionRequired)
+        daemonReadyContinuation = nil
+        resetTrackState(durationMs: 0)
     }
 
     public func seek(to ms: Int) {
@@ -133,7 +145,6 @@ public final class LibrespotBackend {
 
     public func setVolume(_ v: Int) {
         volume = Float(max(0, min(v, 100))) / 100.0
-        audioEngine?.mainMixerNode.outputVolume = volume
         sendCommand("VOLUME \(max(0, min(v, 100)))")
     }
 
@@ -145,11 +156,71 @@ public final class LibrespotBackend {
         bridge.hasSession()
     }
 
-    private func readHelperOutput(outPipe: Pipe, errPipe: Pipe) async {
+    // MARK: - Daemon lifecycle
+
+    private func _doStartDaemon(accessToken: String, volume: Int) async throws {
+        _killDaemonProcess()
+
+        guard let python = await resolveHelperPython() else {
+            throw LibrespotBackendError.pythonNotFound
+        }
+        guard let helper = Bundle.module.path(forResource: "spotify_playback_helper", ofType: "py")
+                ?? Bundle.main.path(forResource: "spotify_playback_helper", ofType: "py") else {
+            throw LibrespotBackendError.helperNotFound
+        }
+
+        let outPipe = Pipe()
+        let inPipe  = Pipe()
+        let errPipe = Pipe()
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: python)
+        proc.arguments = [helper, accessToken, String(max(0, min(volume, 100)))]
+        proc.environment = ExecutableResolver.environmentWithExpandedPATH()
+        proc.standardInput  = inPipe
+        proc.standardOutput = outPipe
+        proc.standardError  = errPipe
+        try proc.run()
+
+        daemonProcess = proc
+        commandPipe   = inPipe
+        isDaemonReady = false
+
+        daemonOutputTask = Task.detached { [weak self] in
+            await self?.readDaemonOutput(outPipe: outPipe, errPipe: errPipe, process: proc)
+        }
+
+        // Wait for READY with a 20-second timeout.
+        try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
+            daemonReadyContinuation = cont
+            Task { [weak self] in
+                try? await Task.sleep(nanoseconds: 20_000_000_000)
+                await MainActor.run { [weak self] in
+                    guard let self else { return }
+                    guard let pending = self.daemonReadyContinuation else { return }
+                    self.daemonReadyContinuation = nil
+                    self.isDaemonReady = false
+                    pending.resume(throwing: LibrespotBackendError.sessionRequired)
+                }
+            }
+        }
+    }
+
+    private func _killDaemonProcess() {
+        daemonOutputTask?.cancel()
+        daemonOutputTask = nil
+        daemonProcess?.terminate()
+        daemonProcess = nil
+        commandPipe = nil
+        isDaemonReady = false
+    }
+
+    // MARK: - Daemon stdout reader
+
+    nonisolated private func readDaemonOutput(outPipe: Pipe, errPipe: Pipe, process: Process) async {
         let handle = outPipe.fileHandleForReading
         var buffer = ""
         while !Task.isCancelled {
-            guard let proc = process, proc.isRunning else { break }
+            guard process.isRunning else { break }
             let data = handle.availableData
             if data.isEmpty {
                 try? await Task.sleep(nanoseconds: 20_000_000)
@@ -159,61 +230,102 @@ public final class LibrespotBackend {
             let parts = buffer.components(separatedBy: .newlines)
             buffer = parts.last ?? ""
             for line in parts.dropLast() {
+                guard await isDaemonProcess(process) else { return }
                 await handleHelperLine(line)
             }
         }
         if !buffer.isEmpty {
+            guard await isDaemonProcess(process) else { return }
             await handleHelperLine(buffer)
         }
-        guard !Task.isCancelled, !didReachEnd else { return }
-        let err = String(data: errPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?
-            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        if !err.isEmpty {
-            await MainActor.run { [weak self] in self?.onError?(err) }
+        // Daemon exited — mark it dead so the next play() will restart it.
+        await MainActor.run { [weak self] in
+            guard let self, self.daemonProcess === process else { return }
+            self.isDaemonReady = false
+            self.daemonProcess = nil
+            self.commandPipe = nil
+            if let pending = self.daemonReadyContinuation {
+                self.daemonReadyContinuation = nil
+                pending.resume(throwing: LibrespotBackendError.sessionRequired)
+            }
         }
     }
 
-    private func handleHelperLine(_ line: String) async {
+    private func isDaemonProcess(_ process: Process) -> Bool {
+        daemonProcess === process
+    }
+
+    private func handleHelperLine(_ line: String) {
         let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
         let parts = trimmed.split(separator: " ", maxSplits: 1).map(String.init)
-        let kind = parts[0]
+        let kind    = parts[0]
         let payload = parts.count > 1 ? parts[1] : ""
         switch kind {
+        case "READY":
+            isDaemonReady = true
+            daemonReadyContinuation?.resume()
+            daemonReadyContinuation = nil
         case "START":
-            playbackDurationMs = Int(payload) ?? playbackDurationMs
+            if let ms = Int(payload), ms > 0 { playbackDurationMs = ms }
             playbackStartedAt = Date()
-            didStartPlayback = true
-            await MainActor.run { [weak self] in self?.onPlaybackStarted?() }
+            didStartPlayback  = true
+            onPlaybackStarted?()
         case "POS":
             let ms = Int(payload) ?? 0
             maxReportedPositionMs = max(maxReportedPositionMs, ms)
             framesPlayed = Int64(Double(ms) / 1000.0 * sampleRate)
-            await MainActor.run { [weak self] in self?.onPositionChanged?(ms) }
+            onPositionChanged?(ms)
         case "END":
             if didStartPlayback && maxReportedPositionMs > 1000 {
                 didReachEnd = true
-                await MainActor.run { [weak self] in self?.onEndReached?() }
+                onEndReached?()
             } else {
-                await MainActor.run { [weak self] in
-                    self?.onError?("Spotify 未成功输出音频，已阻止自动跳到下一首")
-                }
+                onError?("Spotify 未成功输出音频，已阻止自动跳到下一首")
             }
         case "STOPPED":
             didReachEnd = true
         case "ERROR":
-            await MainActor.run { [weak self] in self?.onError?(payload) }
+            onError?(payload)
         default:
-            NSLog("[LibrespotBackend] helper: \(trimmed)")
+            NSLog("[LibrespotBackend] daemon: \(trimmed)")
         }
     }
+
+    // MARK: - Helpers
 
     private func sendCommand(_ command: String) {
         guard let data = "\(command)\n".data(using: .utf8) else { return }
         try? commandPipe?.fileHandleForWriting.write(contentsOf: data)
     }
 
-    private func findSpotifyHelperPython() -> String? {
+    private func resetTrackState(durationMs: Int) {
+        framesPlayed          = 0
+        isPaused              = false
+        playbackStartedAt     = nil
+        playbackBaseMs        = 0
+        playbackDurationMs    = durationMs
+        didReachEnd           = false
+        didStartPlayback      = false
+        maxReportedPositionMs = 0
+    }
+
+    private func resolveHelperPython() async -> String? {
+        if let helperPython { return helperPython }
+        let task: Task<String?, Never>
+        if let existing = helperPythonTask {
+            task = existing
+        } else {
+            task = Task.detached { Self.findSpotifyHelperPython() }
+            helperPythonTask = task
+        }
+        let python = await task.value
+        helperPython = python
+        helperPythonTask = nil
+        return python
+    }
+
+    nonisolated private static func findSpotifyHelperPython() -> String? {
         var candidates: [String] = []
         for dir in ExecutableResolver.searchPathDirectories() {
             candidates.append((dir as NSString).appendingPathComponent("python3"))
@@ -225,7 +337,7 @@ public final class LibrespotBackend {
         var seen = Set<String>()
         for candidate in candidates where seen.insert(candidate).inserted {
             guard FileManager.default.isExecutableFile(atPath: candidate) else { continue }
-            if pythonHasSpotifyDependencies(candidate) {
+            if Self.pythonHasSpotifyDependencies(candidate) {
                 NSLog("[LibrespotBackend] using Python helper runtime: \(candidate)")
                 return candidate
             }
@@ -233,16 +345,13 @@ public final class LibrespotBackend {
         return nil
     }
 
-    private func pythonHasSpotifyDependencies(_ python: String) -> Bool {
+    nonisolated private static func pythonHasSpotifyDependencies(_ python: String) -> Bool {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: python)
-        process.arguments = [
-            "-c",
-            "import librespot, sounddevice, soundfile, numpy",
-        ]
+        process.arguments = ["-c", "import librespot, sounddevice, soundfile, numpy"]
         process.environment = ExecutableResolver.environmentWithExpandedPATH()
         process.standardOutput = FileHandle.nullDevice
-        process.standardError = FileHandle.nullDevice
+        process.standardError  = FileHandle.nullDevice
         do {
             try process.run()
             process.waitUntilExit()

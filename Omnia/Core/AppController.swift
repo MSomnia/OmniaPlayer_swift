@@ -1,12 +1,19 @@
 import Foundation
 import Combine
 
+public struct AppToast: Identifiable, Equatable {
+    public let id = UUID()
+    public let message: String
+}
+
 // MARK: - Constants
 
 private let homeCacheTTL:    TimeInterval = 600   // 10 min
 private let libraryCacheTTL: TimeInterval = 300   // 5 min
 private let tracksCacheTTL:  TimeInterval = 300   // 5 min
 private let tracksCacheMax   = 30
+private let streamURLCacheTTL: TimeInterval = 20 * 60
+private let streamURLCacheMax = 80
 
 private let prefetchThresholds: [String: Int] = [
     "netease": 5_000,
@@ -44,6 +51,7 @@ public final class AppController: ObservableObject {
     @Published public private(set) var artistTracks: [Track] = []
     @Published public private(set) var updateStatus: UpdateStatus? = nil
     @Published public private(set) var lastPlaylistError: String = ""
+    @Published public private(set) var centerToast: AppToast? = nil
 
     /// Set to show a LoginSheet; cleared by `handleLoginResult`.
     @Published public var loginSheetConfig: PlatformLoginConfig? = nil
@@ -78,6 +86,8 @@ public final class AppController: ObservableObject {
     private var homeCache:    [String: (Date, [(String, [Track])])] = [:]
     private var libraryCache: [String: (Date, [Playlist])]          = [:]
     private var tracksCache:  [String: (Date, [Track])]             = [:]
+    private var streamURLCache: [String: (Date, String)]            = [:]
+    private var streamURLTasks: [String: Task<String, Error>]        = [:]
 
     // MARK: Prefetch
 
@@ -85,6 +95,7 @@ public final class AppController: ObservableObject {
     private var prefetchDone = false
     private var prefetchedAutoplay: [Track]?
     private var initialContentPreloadTask: Task<Void, Never>?
+    private var centerToastTask: Task<Void, Never>?
 
     // MARK: Cancellables
 
@@ -162,6 +173,7 @@ public final class AppController: ObservableObject {
         if (try? await spotifyAuth.loadSpDC()) != nil {
             spotifyClient = SpotifyClient(auth: spotifyAuth)
             isSpotifyAuthenticated = true
+            warmUpSpotifyPlayback()
             // Attempt to restore librespot credentials (non-blocking)
             if librespotBridge.hasSession() {
                 // credentials.json already present — librespot can start directly
@@ -294,6 +306,7 @@ public final class AppController: ObservableObject {
                 try? await repo.saveCredential("spotify", data: cookies)
                 spotifyClient = SpotifyClient(auth: spotifyAuth)
                 isSpotifyAuthenticated = true
+                warmUpSpotifyPlayback()
                 await loadHome(for: "spotify")
                 await loadLibrary(for: "spotify")
             case "ytmusic":
@@ -324,6 +337,7 @@ public final class AppController: ObservableObject {
                 try? await repo.saveCredential("spotify", data: cred)
                 spotifyClient = SpotifyClient(auth: spotifyAuth)
                 isSpotifyAuthenticated = true
+                warmUpSpotifyPlayback()
             }
         case "ytmusic":
             let headers = YTMusicAuth.buildHeaders(from: cookies)
@@ -363,6 +377,7 @@ public final class AppController: ObservableObject {
         try? await repo.saveCredential("spotify", data: cookies)
         spotifyClient = SpotifyClient(auth: spotifyAuth)
         isSpotifyAuthenticated = true
+        warmUpSpotifyPlayback()
         Task { try? await librespotBridge.createSessionWithToken(
             (try? await spotifyAuth.getAccessToken()) ?? ""
         ) }
@@ -530,12 +545,11 @@ public final class AppController: ObservableObject {
                 // onPlaybackStarted callback will call playerMachine.onLoadSuccess()
             } else {
                 librespotBackend.stop()
-                let url: String
-                if let cached = track.streamURL {
-                    url = cached
-                } else {
-                    url = try await getStreamURL(track)
+                if track.platform == "netease", !VLCBackend.usesVLCKit {
+                    throw AppControllerError.vlcKitRequired
                 }
+                let url: String
+                url = try await resolveStreamURL(for: track)
                 let ua: String?
                 let headers: [String: String]
                 switch track.platform {
@@ -568,11 +582,41 @@ public final class AppController: ObservableObject {
         // Async side effects
         Task { await fetchLyrics(track) }
         Task { await fetchCoverArt(track) }
+        Task { [weak self] in await self?.prefetchQueuedNextIfAvailable() }
         macosMedia.updateNowPlaying(
             track: track,
             positionMs: 0,
             isPlaying: true
         )
+    }
+
+    private func resolveStreamURL(for track: Track) async throws -> String {
+        if let cached = cachedStreamURL(for: track) {
+            return cached
+        }
+
+        let key = streamCacheKey(for: track)
+        if let task = streamURLTasks[key] {
+            let url = try await task.value
+            cacheStreamURL(url, for: track)
+            return url
+        }
+
+        let task = Task { [weak self] in
+            guard let self else { throw AppControllerError.noClient }
+            return try await self.getStreamURL(track)
+        }
+        streamURLTasks[key] = task
+
+        do {
+            let url = try await task.value
+            cacheStreamURL(url, for: track)
+            streamURLTasks[key] = nil
+            return url
+        } catch {
+            streamURLTasks[key] = nil
+            throw error
+        }
     }
 
     private func getStreamURL(_ track: Track) async throws -> String {
@@ -913,6 +957,7 @@ public final class AppController: ObservableObject {
             if ok {
                 libraryCache.removeValue(forKey: track.platform)
                 tracksCache.removeValue(forKey: "\(track.platform):\(playlist.id)")
+                showCenterToast("已加入 \(playlist.name)")
             } else {
                 lastPlaylistError = "加入歌单失败"
             }
@@ -939,6 +984,39 @@ public final class AppController: ObservableObject {
             if ok { tracksCache.removeValue(forKey: "\(track.platform):\(playlist.id)") }
             return ok
         } catch { return false }
+    }
+
+    public func openArtist(name: String, platform: String) {
+        if currentPage != .artist {
+            pageBeforeArtist = currentPage
+        }
+        currentPage = .artist
+        Task { await loadArtist(name: name, platform: platform) }
+    }
+
+    public func openLyricsPage() {
+        if currentPage != .lyrics {
+            pageBeforeLyrics = currentPage
+        }
+        currentPage = .lyrics
+    }
+
+    public func returnFromArtistPage() {
+        currentPage = pageBeforeArtist
+    }
+
+    public func returnFromLyricsPage() {
+        currentPage = pageBeforeLyrics
+    }
+
+    private func showCenterToast(_ message: String) {
+        centerToastTask?.cancel()
+        centerToast = AppToast(message: message)
+        centerToastTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 3_000_000_000)
+            guard !Task.isCancelled else { return }
+            await MainActor.run { self?.centerToast = nil }
+        }
     }
 
     // MARK: - Artist
@@ -998,12 +1076,7 @@ public final class AppController: ObservableObject {
         guard let current = state.currentTrack else { return }
 
         if let next = playQueue.peekNext(repeatMode: state.repeatMode) {
-            // Pre-fetch stream URL for queue next
-            guard next.streamURL == nil, next.platform != "spotify" else { return }
-            if let url = try? await getStreamURL(next) {
-                // Store on the Track (mutable copy in queue) — best effort
-                _ = url  // AppController will re-fetch on playTrack() if not cached
-            }
+            await prefetchStreamURLIfNeeded(for: next)
         } else {
             // No queue next — pre-load autoplay recommendations
             do {
@@ -1017,8 +1090,31 @@ public final class AppController: ObservableObject {
                     recs = try await spotifyClient?.getRecommendations(track: current) ?? []
                 default: recs = []
                 }
-                prefetchedAutoplay = recs.filter { $0.id != current.id }
+                let filtered = recs.filter { $0.id != current.id }
+                prefetchedAutoplay = filtered
+                if let first = filtered.first {
+                    await prefetchStreamURLIfNeeded(for: first)
+                }
             } catch {}
+        }
+    }
+
+    private func prefetchQueuedNextIfAvailable() async {
+        let state = playerMachine.state
+        guard let current = state.currentTrack,
+              let next = playQueue.peekNext(repeatMode: state.repeatMode),
+              next.platform != "spotify",
+              !(next.platform == current.platform && next.id == current.id) else { return }
+        await prefetchStreamURLIfNeeded(for: next)
+    }
+
+    private func prefetchStreamURLIfNeeded(for track: Track) async {
+        guard track.platform != "spotify",
+              cachedStreamURL(for: track) == nil else { return }
+        do {
+            _ = try await resolveStreamURL(for: track)
+        } catch {
+            NSLog("[AppController] stream prefetch failed for \(track.platform):\(track.id): \(error.localizedDescription)")
         }
     }
 
@@ -1101,8 +1197,10 @@ public final class AppController: ObservableObject {
 
     public func close() {
         prefetchTask?.cancel()
+        streamURLTasks.values.forEach { $0.cancel() }
+        streamURLTasks.removeAll()
         vlc.stop()
-        librespotBackend.stop()
+        librespotBackend.stopDaemon()
         Task { await librespotBridge.close() }
         macosMedia.close()
     }
@@ -1114,13 +1212,54 @@ public final class AppController: ObservableObject {
         libraryCache.removeValue(forKey: platform)
         let prefix = "\(platform):"
         tracksCache = tracksCache.filter { !$0.key.hasPrefix(prefix) }
+        streamURLCache = streamURLCache.filter { !$0.key.hasPrefix(prefix) }
         homeSections.removeValue(forKey: platform)
         library.removeValue(forKey: platform)
+    }
+
+    private func warmUpSpotifyPlayback() {
+        librespotBackend.warmUpRuntime()
+        Task { [weak self] in
+            guard let self else { return }
+            guard let token = try? await self.spotifyAuth.getAccessToken() else { return }
+            let vol = self.playerMachine.state.volume
+            await self.librespotBackend.startDaemon(accessToken: token, volume: vol)
+        }
+    }
+
+    private func streamCacheKey(for track: Track) -> String {
+        "\(track.platform):\(track.id)"
+    }
+
+    private func cachedStreamURL(for track: Track) -> String? {
+        if let url = track.streamURL, !url.isEmpty {
+            cacheStreamURL(url, for: track)
+            return url
+        }
+
+        let key = streamCacheKey(for: track)
+        guard let cached = streamURLCache[key] else { return nil }
+        if Date().timeIntervalSince(cached.0) < streamURLCacheTTL {
+            return cached.1
+        }
+        streamURLCache.removeValue(forKey: key)
+        return nil
+    }
+
+    private func cacheStreamURL(_ url: String, for track: Track) {
+        guard !url.isEmpty else { return }
+        streamURLCache[streamCacheKey(for: track)] = (Date(), url)
+        if streamURLCache.count > streamURLCacheMax {
+            let oldest = streamURLCache.min { $0.value.0 < $1.value.0 }?.key
+            if let oldest { streamURLCache.removeValue(forKey: oldest) }
+        }
     }
 
     /// Build a human-readable error string shown in the UI toast.
     private func apiErrorMessage(_ error: Error, platform: String) -> String {
         switch error {
+        case AppControllerError.vlcKitRequired:
+            return "[\(platform)] 网易云播放需要 VLCKit。请集成 Vendor/VLCKit/VLCKit.xcframework 后重新构建。"
         case NeteaseClientError.apiError(let code, let msg):
             return "[\(platform)] API错误 \(code): \(msg)"
         case NeteaseClientError.httpError(let code):
@@ -1138,4 +1277,5 @@ public final class AppController: ObservableObject {
 public enum AppControllerError: Error {
     case noClient
     case noStreamURL
+    case vlcKitRequired
 }

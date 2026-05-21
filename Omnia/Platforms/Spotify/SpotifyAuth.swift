@@ -67,6 +67,9 @@ public actor SpotifyAuth {
     private var totpSecret: Data?
     private var totpVersion: Int = 5
 
+    // Proactive background token refresh
+    private var refreshTask: Task<Void, Never>?
+
     public init(repository: AppRepository) {
         self.repository = repository
     }
@@ -79,6 +82,8 @@ public actor SpotifyAuth {
     }
 
     public func logout() async throws {
+        refreshTask?.cancel()
+        refreshTask = nil
         try await repository.deleteCredential("spotify")
         cachedToken = nil
         tokenExpiresAt = .distantPast
@@ -117,8 +122,9 @@ public actor SpotifyAuth {
         }
         let spKey: String? = (try? await repository.loadCredential("spotify"))?["sp_key"]
 
-        let serverTime = await getServerTime()
-        let (secret, version) = await getTotpConfig()
+        async let serverTimeTask = getServerTime()
+        async let totpConfigTask = getTotpConfig()
+        let (serverTime, (secret, version)) = await (serverTimeTask, totpConfigTask)
         let clientTime = Int(Date().timeIntervalSince1970)
         let totp = SpotifyTOTP.generate(timestamp: clientTime, secret: secret)
         let totpServer: String
@@ -180,7 +186,20 @@ public actor SpotifyAuth {
         } else {
             tokenExpiresAt = now.addingTimeInterval(3600)
         }
+        scheduleProactiveRefresh()
         return token
+    }
+
+    private func scheduleProactiveRefresh() {
+        refreshTask?.cancel()
+        let fireAt = tokenExpiresAt.addingTimeInterval(-300) // 5 min before expiry
+        let delay  = fireAt.timeIntervalSinceNow
+        guard delay > 60 else { return } // already within 1 min — let normal flow handle it
+        refreshTask = Task {
+            try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+            guard !Task.isCancelled else { return }
+            _ = try? await getAccessToken()
+        }
     }
 
     // MARK: - Server time
