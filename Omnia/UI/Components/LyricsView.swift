@@ -1,5 +1,13 @@
 import SwiftUI
 
+// MARK: - Scroll proxy holder
+
+// A reference-type holder so the scroll view proxy can be accessed from
+// outside the ScrollViewReader closure (i.e. from onReceive handlers).
+private final class LyricScrollProxy: ObservableObject {
+    var proxy: ScrollViewProxy?  // intentionally NOT @Published
+}
+
 // MARK: - LyricsView
 
 public struct LyricsView: View {
@@ -8,6 +16,11 @@ public struct LyricsView: View {
     @State private var lines: [LyricLine] = []
     @State private var currentLineIdx: Int = -1
     @State private var coverRGB: (Int, Int, Int) = (0, 0, 0)
+
+    // Holds the ScrollViewProxy so onReceive can scroll without going through
+    // onChange inside the ScrollViewReader closure (which is unreliable because
+    // the closure is recreated on every body evaluation, losing onChange state).
+    @StateObject private var scrollProxy = LyricScrollProxy()
 
     public init(ctrl: AppController) { self.ctrl = ctrl }
 
@@ -33,12 +46,16 @@ public struct LyricsView: View {
         .background(Theme.bgBase)
         .onAppear {
             lines = ctrl.currentLyrics
-            currentLineIdx = Self.lineIndex(in: ctrl.currentLyrics, positionMs: ctrl.playerState.positionMs)
+            let idx = Self.lineIndex(in: ctrl.currentLyrics, positionMs: ctrl.playerState.positionMs)
+            currentLineIdx = idx
             coverRGB = ctrl.currentCoverColor
+            scheduleScroll(to: idx)
         }
         .onReceive(ctrl.$currentLyrics) { newLines in
             lines = newLines
-            currentLineIdx = Self.lineIndex(in: newLines, positionMs: ctrl.playerState.positionMs)
+            let idx = Self.lineIndex(in: newLines, positionMs: ctrl.playerState.positionMs)
+            currentLineIdx = idx
+            scheduleScroll(to: idx)
         }
         .onReceive(ctrl.$currentCoverColor) { color in
             coverRGB = color
@@ -47,11 +64,26 @@ public struct LyricsView: View {
             let idx = Self.lineIndex(in: lines, positionMs: position)
             if idx != currentLineIdx {
                 currentLineIdx = idx
+                scheduleScroll(to: idx)
             }
         }
     }
 
-    // MARK: Scroller
+    // MARK: - Scroll helper
+
+    // Dispatch the scroll to the next run-loop cycle so it always runs after
+    // the current SwiftUI layout pass has committed (proxy.scrollTo called
+    // synchronously inside onChange fires during the layout pass and is dropped).
+    private func scheduleScroll(to idx: Int) {
+        guard idx >= 0 else { return }
+        DispatchQueue.main.async {
+            withAnimation(.easeInOut(duration: 0.4)) {
+                scrollProxy.proxy?.scrollTo(idx, anchor: .center)
+            }
+        }
+    }
+
+    // MARK: - Scroller
 
     private var lyricsScroller: some View {
         ScrollViewReader { proxy in
@@ -72,27 +104,19 @@ public struct LyricsView: View {
                 }
                 .padding(.horizontal, 40)
             }
-            // proxy.scrollTo must run after the current SwiftUI layout pass
-            // commits; calling it synchronously inside onChange fires during
-            // the render cycle and is silently ignored by the scroll view.
-            // Jump to the current line without animation when the view first appears
-            // (covers both initial open and re-navigation from another page).
             .onAppear {
+                // Store the proxy so scheduleScroll can reach it from outside
+                // this closure. Also do an immediate (no-animation) jump so
+                // the view opens at the right line every time.
+                scrollProxy.proxy = proxy
                 guard currentLineIdx >= 0 else { return }
                 proxy.scrollTo(currentLineIdx, anchor: .center)
             }
-            .onChange(of: currentLineIdx) { idx in
-                guard idx >= 0 else { return }
-                DispatchQueue.main.async {
-                    withAnimation(.easeInOut(duration: 0.4)) {
-                        proxy.scrollTo(idx, anchor: .center)
-                    }
-                }
-            }
+            // No onChange here — scroll is driven via scheduleScroll / scrollProxy
         }
     }
 
-    // MARK: Empty state
+    // MARK: - Empty state
 
     private var emptyState: some View {
         VStack(spacing: 12) {

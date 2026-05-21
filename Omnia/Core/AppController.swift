@@ -97,6 +97,12 @@ public final class AppController: ObservableObject {
     private var initialContentPreloadTask: Task<Void, Never>?
     private var centerToastTask: Task<Void, Never>?
 
+    // Seek suppression: VLC keeps polling the old position for ~300-500 ms after
+    // a seek command, causing positionMs (and lyric highlight) to briefly revert.
+    // Track the seek target so the VLC callback can discard stale pre-seek reports.
+    private var pendingSeekTarget: Int? = nil
+    private var pendingSeekTime: Date? = nil
+
     // MARK: Cancellables
 
     private var cancellables = Set<AnyCancellable>()
@@ -221,8 +227,19 @@ public final class AppController: ObservableObject {
     private func wireBackendCallbacks() {
         // VLC → state machine
         vlc.onPositionChanged = { [weak self] ms in
-            self?.playerMachine.updatePosition(ms)
-            self?.onPositionTick(ms)
+            guard let self else { return }
+            // Discard stale pre-seek positions that arrive while VLC is still
+            // seeking (poll fires with old position for ~300–500 ms after seek).
+            if let target = self.pendingSeekTarget, let seekTime = self.pendingSeekTime {
+                if Date().timeIntervalSince(seekTime) > 0.8 {
+                    self.pendingSeekTarget = nil
+                    self.pendingSeekTime = nil
+                } else if ms < target - 500 {
+                    return
+                }
+            }
+            self.playerMachine.updatePosition(ms)
+            self.onPositionTick(ms)
         }
         vlc.onDurationChanged = { [weak self] ms in
             self?.playerMachine.updateDuration(ms)
@@ -681,6 +698,12 @@ public final class AppController: ObservableObject {
     public func seek(to ms: Int) {
         let isSpotify = playerMachine.state.currentTrack?.platform == "spotify"
         playerMachine.seek(to: ms)
+        if !isSpotify {
+            // Record seek target so the VLC poll callback can suppress stale
+            // pre-seek position reports for the next ~800 ms.
+            pendingSeekTarget = ms
+            pendingSeekTime = Date()
+        }
         Task { @MainActor [weak self] in
             guard let self else { return }
             if isSpotify {
