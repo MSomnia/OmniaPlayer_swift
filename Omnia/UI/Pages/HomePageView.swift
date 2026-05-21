@@ -188,8 +188,6 @@ private struct TrackCardView: View {
     }
 
     private func navigateToArtist() {
-        ctrl.pageBeforeArtist = ctrl.currentPage
-        Task { await ctrl.loadArtist(name: track.artist, platform: track.platform) }
-        ctrl.currentPage = .artist
+        ctrl.openArtist(name: track.artist, platform: track.platform)
     }
 }

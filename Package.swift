@@ -19,17 +19,28 @@ let package = Package(
             name: "Omnia",
             dependencies: [
                 .product(name: "GRDB", package: "GRDB.swift"),
-                .product(name: "KeychainAccess", package: "KeychainAccess")
+                .product(name: "KeychainAccess", package: "KeychainAccess"),
+                "VLCKit"
             ],
             path: "Omnia",
+            exclude: [
+                "docs"
+            ],
             resources: [
                 .process("Resources")
             ]
         ),
         .testTarget(
             name: "OmniaTests",
-            dependencies: ["Omnia"],
+            dependencies: [
+                "Omnia",
+                "VLCKit"
+            ],
             path: "Tests/OmniaTests"
+        ),
+        .binaryTarget(
+            name: "VLCKit",
+            path: "Vendor/VLCKit/VLCKit.xcframework"
         )
     ]
 )

@@ -1,12 +1,5 @@
 import SwiftUI
-
-// MARK: - Scroll proxy holder
-
-// A reference-type holder so the scroll view proxy can be accessed from
-// outside the ScrollViewReader closure (i.e. from onReceive handlers).
-private final class LyricScrollProxy: ObservableObject {
-    var proxy: ScrollViewProxy?  // intentionally NOT @Published
-}
+import AppKit
 
 // MARK: - LyricsView
 
@@ -16,11 +9,7 @@ public struct LyricsView: View {
     @State private var lines: [LyricLine] = []
     @State private var currentLineIdx: Int = -1
     @State private var coverRGB: (Int, Int, Int) = (0, 0, 0)
-
-    // Holds the ScrollViewProxy so onReceive can scroll without going through
-    // onChange inside the ScrollViewReader closure (which is unreliable because
-    // the closure is recreated on every body evaluation, losing onChange state).
-    @StateObject private var scrollProxy = LyricScrollProxy()
+    @State private var coverData: Data? = nil
 
     public init(ctrl: AppController) { self.ctrl = ctrl }
 
@@ -31,11 +20,7 @@ public struct LyricsView: View {
 
     public var body: some View {
         ZStack {
-            LinearGradient(
-                colors: [coverColor.opacity(0.4), Theme.bgBase],
-                startPoint: .top, endPoint: .bottom
-            )
-            .ignoresSafeArea()
+            backgroundView
 
             if lines.isEmpty {
                 emptyState
@@ -46,41 +31,67 @@ public struct LyricsView: View {
         .background(Theme.bgBase)
         .onAppear {
             lines = ctrl.currentLyrics
-            let idx = Self.lineIndex(in: ctrl.currentLyrics, positionMs: ctrl.playerState.positionMs)
-            currentLineIdx = idx
+            currentLineIdx = Self.lineIndex(in: ctrl.currentLyrics,
+                                             positionMs: ctrl.playerState.positionMs)
             coverRGB = ctrl.currentCoverColor
-            scheduleScroll(to: idx)
+            coverData = ctrl.currentCoverData
         }
         .onReceive(ctrl.$currentLyrics) { newLines in
             lines = newLines
-            let idx = Self.lineIndex(in: newLines, positionMs: ctrl.playerState.positionMs)
-            currentLineIdx = idx
-            scheduleScroll(to: idx)
+            currentLineIdx = Self.lineIndex(in: newLines,
+                                             positionMs: ctrl.playerState.positionMs)
         }
         .onReceive(ctrl.$currentCoverColor) { color in
             coverRGB = color
         }
+        .onReceive(ctrl.$currentCoverData) { data in
+            coverData = data
+        }
+        // Read ctrl.currentLyrics directly (not the @State copy) to guarantee
+        // a fresh array even if the onReceive closure captured a stale @State.
         .onReceive(ctrl.$playerState.map(\.positionMs).removeDuplicates()) { position in
-            let idx = Self.lineIndex(in: lines, positionMs: position)
+            let idx = Self.lineIndex(in: ctrl.currentLyrics, positionMs: position)
             if idx != currentLineIdx {
                 currentLineIdx = idx
-                scheduleScroll(to: idx)
             }
         }
     }
 
-    // MARK: - Scroll helper
+    // MARK: - Background
 
-    // Dispatch the scroll to the next run-loop cycle so it always runs after
-    // the current SwiftUI layout pass has committed (proxy.scrollTo called
-    // synchronously inside onChange fires during the layout pass and is dropped).
-    private func scheduleScroll(to idx: Int) {
-        guard idx >= 0 else { return }
-        DispatchQueue.main.async {
-            withAnimation(.easeInOut(duration: 0.4)) {
-                scrollProxy.proxy?.scrollTo(idx, anchor: .center)
+    private var backgroundView: some View {
+        ZStack {
+            Theme.bgBase
+
+            if let coverData, let image = NSImage(data: coverData) {
+                GeometryReader { geo in
+                    Image(nsImage: image)
+                        .resizable()
+                        .scaledToFill()
+                        .frame(width: geo.size.width, height: geo.size.height)
+                        .scaleEffect(1.18)
+                        .blur(radius: 70)
+                        .opacity(0.7)
+                        .clipped()
+                }
+            } else {
+                LinearGradient(
+                    colors: [coverColor.opacity(0.4), Theme.bgBase],
+                    startPoint: .top, endPoint: .bottom
+                )
             }
+
+            LinearGradient(
+                colors: [
+                    Theme.bgBase.opacity(0.25),
+                    Theme.bgBase.opacity(0.56),
+                    Theme.bgBase.opacity(0.86),
+                ],
+                startPoint: .top,
+                endPoint: .bottom
+            )
         }
+        .ignoresSafeArea()
     }
 
     // MARK: - Scroller
@@ -96,7 +107,6 @@ public struct LyricsView: View {
                             line:      lines[idx],
                             isCurrent: idx == currentLineIdx
                         )
-                        .equatable()
                         .id(idx)
                     }
 
@@ -104,15 +114,23 @@ public struct LyricsView: View {
                 }
                 .padding(.horizontal, 40)
             }
+            // Jump immediately to the current line each time the view appears
+            // (initial open + every re-navigation to the lyrics page).
             .onAppear {
-                // Store the proxy so scheduleScroll can reach it from outside
-                // this closure. Also do an immediate (no-animation) jump so
-                // the view opens at the right line every time.
-                scrollProxy.proxy = proxy
                 guard currentLineIdx >= 0 else { return }
                 proxy.scrollTo(currentLineIdx, anchor: .center)
             }
-            // No onChange here — scroll is driven via scheduleScroll / scrollProxy
+            // Scroll on every line change. DispatchQueue.main.async defers the
+            // call to the next run-loop cycle so it fires after the current
+            // SwiftUI layout pass commits (synchronous scrollTo is dropped).
+            .onChange(of: currentLineIdx) { idx in
+                guard idx >= 0 else { return }
+                DispatchQueue.main.async {
+                    withAnimation(.easeInOut(duration: 0.4)) {
+                        proxy.scrollTo(idx, anchor: .center)
+                    }
+                }
+            }
         }
     }
 
@@ -135,22 +153,11 @@ public struct LyricsView: View {
     }
 }
 
-extension LyricsView: Equatable {
-    public static func == (lhs: LyricsView, rhs: LyricsView) -> Bool {
-        lhs.ctrl === rhs.ctrl
-    }
-}
-
 // MARK: - LyricLineView
 
-struct LyricLineView: View, Equatable {
+struct LyricLineView: View {
     let line:      LyricLine
     let isCurrent: Bool
-
-    static func == (lhs: LyricLineView, rhs: LyricLineView) -> Bool {
-        lhs.line == rhs.line &&
-        lhs.isCurrent == rhs.isCurrent
-    }
 
     var body: some View {
         Text(line.text)

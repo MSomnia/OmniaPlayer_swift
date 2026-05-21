@@ -35,11 +35,7 @@ public struct ArtistPageView: View {
                                 ctrl.addToQueue(track)
                             },
                             onArtistClicked: { track in
-                                ctrl.pageBeforeArtist = .artist
-                                Task {
-                                    await ctrl.loadArtist(name: track.artist, platform: track.platform)
-                                    ctrl.currentPage = .artist
-                                }
+                                ctrl.openArtist(name: track.artist, platform: track.platform)
                             },
                             onAddToPlaylist: { _ in }
                         )
@@ -60,7 +56,7 @@ public struct ArtistPageView: View {
     private var navBar: some View {
         HStack(spacing: 12) {
             Button {
-                ctrl.currentPage = ctrl.pageBeforeArtist
+                ctrl.returnFromArtistPage()
             } label: {
                 HStack(spacing: 6) {
                     Image(systemName: "chevron.left")

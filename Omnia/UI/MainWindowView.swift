@@ -60,6 +60,14 @@ public struct MainWindowView: View {
                     .animation(.easeInOut(duration: 0.25), value: ctrl.currentPage)
             }
         }
+        .overlay {
+            if let toast = ctrl.centerToast {
+                centerToastView(toast.message)
+                    .id(toast.id)
+                    .transition(.scale(scale: 0.96).combined(with: .opacity))
+            }
+        }
+        .animation(.easeInOut(duration: 0.18), value: ctrl.centerToast?.id)
         .overlay(alignment: .top) {
             if toastVisible { toastView }
         }
@@ -111,7 +119,7 @@ public struct MainWindowView: View {
         case .aggregateSearch: AggregateSearchPageView(ctrl: ctrl)
         case .library:         LibraryPageView(ctrl: ctrl)
         case .settings:        SettingsPageView(ctrl: ctrl)
-        case .lyrics:          LyricsView(ctrl: ctrl).equatable()
+        case .lyrics:          LyricsView(ctrl: ctrl)
         case .artist:          ArtistPageView(ctrl: ctrl)
         case .standby:         HomePageView(ctrl: ctrl)  // underlying page; standby shown via overlay
         }
@@ -144,6 +152,17 @@ public struct MainWindowView: View {
             .clipShape(Capsule())
             .padding(.top, 12)
             .transition(.move(edge: .top).combined(with: .opacity))
+    }
+
+    private func centerToastView(_ message: String) -> some View {
+        Text(message)
+            .font(Theme.font(Theme.fontMD, weight: .semibold))
+            .foregroundStyle(.white)
+            .padding(.horizontal, 22)
+            .padding(.vertical, 12)
+            .background(Color.black.opacity(0.86))
+            .clipShape(Capsule())
+            .shadow(color: .black.opacity(0.35), radius: 18, y: 8)
     }
 
     func showToast(_ message: String) {

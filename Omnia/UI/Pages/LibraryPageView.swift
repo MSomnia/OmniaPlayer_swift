@@ -13,8 +13,6 @@ public struct LibraryPageView: View {
     @State private var isLoadingTracks: Bool = false
     @State private var showPlaylistPicker: Bool = false
     @State private var trackForPlaylist: Track? = nil
-    @State private var toastMessage: String = ""
-    @State private var toastVisible: Bool = false
 
     public init(ctrl: AppController) {
         self.ctrl = ctrl
@@ -42,16 +40,9 @@ public struct LibraryPageView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .background(Theme.surfaceBackground(hasBackgroundImage: !ctrl.backgroundImagePath.isEmpty))
-        .overlay(alignment: .top) {
-            if toastVisible { toastView.padding(.top, 12) }
-        }
         .onChange(of: ctrl.libraryPlatform) { _ in
             selectedPlaylist = nil
             playlistTracks = []
-        }
-        .onChange(of: ctrl.lastPlaylistError) { err in
-            guard !err.isEmpty else { return }
-            showToast(err)
         }
         .onChange(of: ctrl.isNeteaseAuthenticated) { auth in
             if auth && ctrl.libraryPlatform == "netease" { Task { await prepareLibrary() } }
@@ -282,11 +273,7 @@ public struct LibraryPageView: View {
                             ctrl.addToQueue(track)
                         },
                         onArtistClicked: { track in
-                            ctrl.pageBeforeArtist = ctrl.currentPage
-                            Task {
-                                await ctrl.loadArtist(name: track.artist, platform: track.platform)
-                                ctrl.currentPage = .artist
-                            }
+                            ctrl.openArtist(name: track.artist, platform: track.platform)
                         },
                         onAddToPlaylist: { track in
                             trackForPlaylist = track
@@ -309,8 +296,7 @@ public struct LibraryPageView: View {
                                 ctrl: ctrl,
                                 onSelected: { targetPlaylist in
                                     Task {
-                                        let ok = await ctrl.addTrackToPlaylist(track, to: targetPlaylist)
-                                        if ok { showToast("已加入 \(targetPlaylist.name)") }
+                                        _ = await ctrl.addTrackToPlaylist(track, to: targetPlaylist)
                                     }
                                 }
                             )
@@ -419,28 +405,6 @@ public struct LibraryPageView: View {
         playlistTracks = tracks
         isLoadingTracks = false
     }
-
-    // MARK: - Toast
-
-    private var toastView: some View {
-        Text(toastMessage)
-            .font(Theme.font(Theme.fontSM))
-            .foregroundStyle(.white)
-            .padding(.horizontal, 16)
-            .padding(.vertical, 8)
-            .background(Color.black.opacity(0.8))
-            .clipShape(Capsule())
-            .transition(.move(edge: .top).combined(with: .opacity))
-    }
-
-    private func showToast(_ message: String) {
-        toastMessage = message
-        withAnimation { toastVisible = true }
-        Task {
-            try? await Task.sleep(nanoseconds: 3_000_000_000)
-            withAnimation { toastVisible = false }
-        }
-    }
 }
 
 // MARK: - LibraryTrackListView
@@ -466,17 +430,9 @@ private struct LibraryTrackListView: View {
                         onPlay:          { onPlay(track) },
                         onAddToQueue:    { onAddToQueue(track) },
                         onArtistClicked: { onArtistClicked(track) },
-                        onAddToPlaylist: { onAddToPlaylist(track) }
+                        onAddToPlaylist: { onAddToPlaylist(track) },
+                        onRemoveFromPlaylist: { onRemoveFromPlaylist(track) }
                     )
-                    .contextMenu {
-                        Button("播放") { onPlay(track) }
-                        Button("加入队列") { onAddToQueue(track) }
-                        Divider()
-                        Button("加入歌单…") { onAddToPlaylist(track) }
-                        Button("查看艺术家") { onArtistClicked(track) }
-                        Divider()
-                        Button("从歌单移除") { onRemoveFromPlaylist(track) }
-                    }
                     if idx < tracks.count - 1 {
                         Divider()
                             .background(Theme.divider)

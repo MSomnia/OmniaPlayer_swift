@@ -310,11 +310,7 @@ public struct SearchPageView: View {
     }
 
     private func navigateToArtist(_ track: Track) {
-        ctrl.pageBeforeArtist = ctrl.currentPage
-        Task {
-            await ctrl.loadArtist(name: track.artist, platform: track.platform)
-            ctrl.currentPage = .artist
-        }
+        ctrl.openArtist(name: track.artist, platform: track.platform)
     }
 
     private func openAlbum(_ album: Album) {

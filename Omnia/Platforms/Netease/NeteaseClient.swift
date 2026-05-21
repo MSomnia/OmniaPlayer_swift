@@ -69,9 +69,9 @@ public actor NeteaseClient: PlatformProtocol {
 
     public func search(query: String, limit: Int = 30) async throws -> [Track] {
         let data = try await postWithFallback(
-            path: "/weapi/search/get",
-            params: searchParams(query: query, type: 1, limit: limit),
-            proxyPath: "/search",
+            path: "/weapi/cloudsearch/pc",
+            params: cloudSearchParams(query: query, type: 1, limit: limit),
+            proxyPath: "/cloudsearch",
             proxyParams: ["keywords": query, "type": 1, "limit": limit]
         )
         let songs = (data["result"] as? [String: Any])?["songs"] as? [[String: Any]] ?? []
@@ -113,28 +113,37 @@ public actor NeteaseClient: PlatformProtocol {
             "csrf_token": cookies["__csrf"] ?? ""
         ]
 
-        var lastDownloadError: Error?
+        // Match the Python implementation: prefer NeteaseCloudMusicApi for
+        // playback URLs. Direct /api can return a URL that looks valid but is
+        // rejected by the CDN with "auth failed - origin failed".
+        if let data = try? await proxyGet(path: "/song/url/v1", params: ["id": track.id, "level": "exhigh"]),
+           !data.isEmpty,
+           let items = data["data"] as? [[String: Any]],
+           let url = items.first?["url"] as? String, !url.isEmpty {
+            NSLog("[NeteaseClient] stream URL via local proxy: \(url.prefix(60))")
+            return playableStreamURL(url)
+        }
 
-        // Primary: NWConnection (HTTP/1.1, bypasses WAF)
+        // Fallback 1: NWConnection (HTTP/1.1, bypasses WAF)
         if let data = try? await post(path: "/weapi/song/enhance/player/url/v1", params: params),
            !data.isEmpty,
            let items = data["data"] as? [[String: Any]],
            let url = items.first?["url"] as? String, !url.isEmpty {
             NSLog("[NeteaseClient] stream URL via NWConnection: \(url.prefix(60))")
-            return url
+            return playableStreamURL(url)
         }
 
-        // Fallback 1: URLSession POST (HTTP/2, some CDN paths accept it)
+        // Fallback 2: URLSession POST (HTTP/2, some CDN paths accept it)
         if let data = try? await urlSessionWeapiPost(path: "/weapi/song/enhance/player/url/v1", params: params),
            !data.isEmpty,
            let items = data["data"] as? [[String: Any]],
            let url = items.first?["url"] as? String, !url.isEmpty {
             NSLog("[NeteaseClient] stream URL via URLSession POST: \(url.prefix(60))")
-            return url
+            return playableStreamURL(url)
         }
 
-        // Fallback 2: direct /api endpoint. This avoids depending on the local
-        // NeteaseCloudMusicApi proxy for the common playback path.
+        // Last resort: direct /api endpoint. Keep this behind the authenticated
+        // paths because its CDN auth token is not reliable for playback.
         if let data = try? await apiGet(
             path: "/api/song/enhance/player/url/v1",
             params: ["ids": "[\(songId)]", "level": "exhigh", "encodeType": "flac"]
@@ -143,96 +152,14 @@ public actor NeteaseClient: PlatformProtocol {
            let items = data["data"] as? [[String: Any]],
            let url = items.first?["url"] as? String, !url.isEmpty {
             NSLog("[NeteaseClient] stream URL via direct /api: \(url.prefix(60))")
-            do {
-                return try await playableLocalURL(remoteURL: url, trackId: track.id, referer: "https://music.163.com/song?id=\(track.id)")
-            } catch {
-                lastDownloadError = error
-                NSLog("[NeteaseClient] stream download failed for direct /api URL: \(error.localizedDescription)")
-            }
+            return playableStreamURL(url)
         }
 
-        // Fallback 3: local proxy
-        if let data = try? await proxyGet(path: "/song/url/v1", params: ["id": track.id, "level": "exhigh"]),
-           !data.isEmpty,
-           let items = data["data"] as? [[String: Any]],
-           let url = items.first?["url"] as? String, !url.isEmpty {
-            NSLog("[NeteaseClient] stream URL via proxy: \(url.prefix(60))")
-            do {
-                return try await playableLocalURL(remoteURL: url, trackId: track.id, referer: "https://music.163.com/song?id=\(track.id)")
-            } catch {
-                lastDownloadError = error
-                NSLog("[NeteaseClient] stream download failed for proxy URL: \(error.localizedDescription)")
-            }
-        }
-
-        if let lastDownloadError { throw lastDownloadError }
         throw NeteaseClientError.noStreamURL(track.id)
     }
 
-    private func playableLocalURL(remoteURL: String, trackId: String, referer: String) async throws -> String {
-        guard remoteURL.hasPrefix("http://") else { return remoteURL }
-
-        let directory = FileManager.default.temporaryDirectory
-            .appendingPathComponent("OmniaNeteaseAudio", isDirectory: true)
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-
-        let ext = URL(string: remoteURL)?.pathExtension.isEmpty == false
-            ? URL(string: remoteURL)!.pathExtension
-            : "mp3"
-        let fileURL = directory.appendingPathComponent("\(trackId).\(ext)")
-        if let attrs = try? FileManager.default.attributesOfItem(atPath: fileURL.path),
-           let size = attrs[.size] as? NSNumber,
-           size.intValue > 0 {
-            return fileURL.absoluteString
-        }
-
-        guard let curl = ExecutableResolver.findExecutable(named: "curl", extraCandidates: ["/usr/bin/curl"]) else {
-            throw NeteaseClientError.downloadFailed("找不到 curl")
-        }
-
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            let process = Process()
-            process.executableURL = URL(fileURLWithPath: curl)
-            process.arguments = [
-                "-L",
-                "--fail",
-                "--silent",
-                "--show-error",
-                "--connect-timeout", "10",
-                "--max-time", "90",
-                "-A", neteaseUserAgent,
-                "-e", referer,
-                "-H", "Referer: \(referer)",
-                "-H", "Origin: https://music.163.com",
-                "-H", "Cookie: \(cookieHeader(cookies))",
-                "-H", "Accept: */*",
-                "-H", "Accept-Language: zh-CN,zh;q=0.9,en;q=0.8",
-                "-o", fileURL.path,
-                remoteURL,
-            ]
-            process.environment = ExecutableResolver.environmentWithExpandedPATH()
-            let errPipe = Pipe()
-            process.standardOutput = FileHandle.nullDevice
-            process.standardError = errPipe
-            process.terminationHandler = { proc in
-                if proc.terminationStatus == 0 {
-                    continuation.resume()
-                } else {
-                    try? FileManager.default.removeItem(at: fileURL)
-                    let err = String(data: errPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?
-                        .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-                    continuation.resume(throwing: NeteaseClientError.downloadFailed(err.isEmpty ? "curl exited \(proc.terminationStatus)" : err))
-                }
-            }
-            do {
-                try process.run()
-            } catch {
-                continuation.resume(throwing: NeteaseClientError.downloadFailed(error.localizedDescription))
-            }
-        }
-
-        NSLog("[NeteaseClient] downloaded stream to local file: \(fileURL.path)")
-        return fileURL.absoluteString
+    private func playableStreamURL(_ rawURL: String) -> String {
+        rawURL
     }
 
     private func urlSessionWeapiPost(path: String, params: [String: Any]) async throws -> [String: Any] {
@@ -489,6 +416,17 @@ public actor NeteaseClient: PlatformProtocol {
         ["s": query, "type": type, "limit": limit, "offset": 0, "csrf_token": cookies["__csrf"] ?? ""]
     }
 
+    private func cloudSearchParams(query: String, type: Int, limit: Int) -> [String: Any] {
+        [
+            "s": query,
+            "type": type,
+            "limit": limit,
+            "offset": 0,
+            "total": true,
+            "csrf_token": cookies["__csrf"] ?? "",
+        ]
+    }
+
     // MARK: - HTTP/1.1 POST via Network.framework
     //
     // URLSession negotiates HTTP/2 with music.163.com; Netease's WAF fingerprints
@@ -686,6 +624,13 @@ public actor NeteaseClient: PlatformProtocol {
         let al = (song["al"] as? [String: Any])
             ?? (song["album"] as? [String: Any])
             ?? [:]
+        let coverURL = firstString(
+            al["picUrl"],
+            song["picUrl"],
+            song["coverUrl"],
+            song["coverImgUrl"]
+        )
+
         return Track(
             id: String(describing: song["id"] ?? ""),
             platform: "netease",
@@ -693,7 +638,7 @@ public actor NeteaseClient: PlatformProtocol {
             artist: artistNames.first ?? "",
             artists: artistNames,
             album: al["name"] as? String ?? "",
-            albumCoverURL: httpsURL((al["picUrl"] as? String) ?? (al["pic"] as? String) ?? ""),
+            albumCoverURL: httpsURL(coverURL),
             durationMs: intValue(song["dt"] ?? song["duration"]) ?? 0,
             isExplicit: false
         )
@@ -726,6 +671,15 @@ public actor NeteaseClient: PlatformProtocol {
 
     private func httpsURL(_ url: String) -> String {
         url.hasPrefix("http://") ? "https://" + url.dropFirst(7) : url
+    }
+
+    private func firstString(_ values: Any?...) -> String {
+        for value in values {
+            if let string = value as? String, !string.isEmpty {
+                return string
+            }
+        }
+        return ""
     }
 
     private func playlistOpSucceeded(_ data: [String: Any]) -> Bool {

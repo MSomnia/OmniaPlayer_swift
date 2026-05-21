@@ -24,6 +24,7 @@ public actor YTMusicClient: PlatformProtocol {
     private let cookieStr: String
     private let sapisid: String
     private let session: URLSession
+    private var cachedYtDlpCommands: [ProcessCommand]?
 
     private struct ProcessCommand {
         let executable: String
@@ -280,6 +281,10 @@ public actor YTMusicClient: PlatformProtocol {
     }
 
     private func ytDlpCommands() -> [ProcessCommand] {
+        if let cachedYtDlpCommands {
+            return cachedYtDlpCommands
+        }
+
         var commands: [ProcessCommand] = []
         if let binary = findYtDlpBinary() {
             commands.append(ProcessCommand(executable: binary, argumentsPrefix: []))
@@ -287,6 +292,7 @@ public actor YTMusicClient: PlatformProtocol {
         if let python = ExecutableResolver.findExecutable(named: "python3") {
             commands.append(ProcessCommand(executable: python, argumentsPrefix: ["-m", "yt_dlp"]))
         }
+        cachedYtDlpCommands = commands
         return commands
     }
 
@@ -328,6 +334,9 @@ public actor YTMusicClient: PlatformProtocol {
     }
 
     private func parseFirstArtist(_ data: [String: Any]) -> Artist? {
+        for renderer in allMusicCardShelfRenderers(in: data) {
+            if let a = artistFromCardShelfRenderer(renderer) { return a }
+        }
         for renderer in allMusicResponsiveListItemRenderers(in: data) {
             if let a = artistFromResponsiveRenderer(renderer) { return a }
         }
@@ -447,6 +456,12 @@ public actor YTMusicClient: PlatformProtocol {
                 if tracks.count >= limit { return tracks }
             }
         }
+        for r in allMusicTwoRowItemRenderers(in: data) {
+            if let t = trackFromTwoRowRenderer(r) {
+                tracks.append(t)
+                if tracks.count >= limit { return tracks }
+            }
+        }
         return tracks
     }
 
@@ -559,6 +574,23 @@ public actor YTMusicClient: PlatformProtocol {
                      coverURL: cover, trackCount: 0, year: year)
     }
 
+    private func artistFromCardShelfRenderer(_ r: [String: Any]) -> Artist? {
+        let name = firstRunText(r["title"])
+        guard !name.isEmpty else { return nil }
+
+        let subtitleTexts = collectText(in: r["subtitle"] ?? [:])
+        if !subtitleTexts.isEmpty,
+           !subtitleTexts.contains(where: isArtistTypeText) {
+            return nil
+        }
+
+        guard let browseId = browseIdFromNavigationEndpoint(r["navigationEndpoint"] as? [String: Any])
+                ?? browseIdFromTextRuns(r["title"]),
+              !browseId.isEmpty else { return nil }
+        let cover = thumbnailURL(from: r["thumbnail"] ?? r["thumbnailRenderer"])
+        return Artist(id: browseId, platform: "ytmusic", name: name, imageURL: cover)
+    }
+
     private func artistFromResponsiveRenderer(_ r: [String: Any]) -> Artist? {
         // Only match if overlay says it's an artist
         let cols = r["flexColumns"] as? [[String: Any]] ?? []
@@ -568,9 +600,8 @@ public actor YTMusicClient: PlatformProtocol {
 
         let name = flexColumnRuns(cols, index: 0).first?["text"] as? String ?? ""
         guard !name.isEmpty else { return nil }
-        let navEp2 = r["navigationEndpoint"] as? [String: Any]
-        let browseEp2 = navEp2?["browseEndpoint"] as? [String: Any]
-        let browseId = browseEp2?["browseId"] as? String ?? ""
+        let browseId = browseIdFromResponsiveRenderer(r)
+        guard !browseId.isEmpty else { return nil }
         let cover = thumbnailURL(from: r["thumbnail"])
         return Artist(id: browseId, platform: "ytmusic", name: name, imageURL: cover)
     }
@@ -581,7 +612,8 @@ public actor YTMusicClient: PlatformProtocol {
         let name = firstRunText(r["title"])
         guard !name.isEmpty else { return nil }
         let navEp = r["navigationEndpoint"] as? [String: Any]
-        let browseId = (navEp?["browseEndpoint"] as? [String: Any])?["browseId"] as? String ?? ""
+        guard let browseId = browseIdFromNavigationEndpoint(navEp),
+              !browseId.isEmpty else { return nil }
         let cover = thumbnailURL(from: r["thumbnailRenderer"])
         return Artist(id: browseId, platform: "ytmusic", name: name, imageURL: cover)
     }
@@ -681,6 +713,10 @@ public actor YTMusicClient: PlatformProtocol {
         findRenderers(named: "musicTwoRowItemRenderer", in: data)
     }
 
+    private func allMusicCardShelfRenderers(in data: [String: Any]) -> [[String: Any]] {
+        findRenderers(named: "musicCardShelfRenderer", in: data)
+    }
+
     private func findRenderers(named key: String, in value: Any) -> [[String: Any]] {
         var result: [[String: Any]] = []
         func walk(_ node: Any) {
@@ -735,6 +771,43 @@ public actor YTMusicClient: PlatformProtocol {
             }
         }
         return ""
+    }
+
+    private func browseIdFromResponsiveRenderer(_ r: [String: Any]) -> String {
+        if let browseId = browseIdFromNavigationEndpoint(r["navigationEndpoint"] as? [String: Any]) {
+            return browseId
+        }
+
+        let cols = r["flexColumns"] as? [[String: Any]] ?? []
+        for run in flexColumnRuns(cols, index: 0) {
+            if let browseId = browseIdFromNavigationEndpoint(run["navigationEndpoint"] as? [String: Any]) {
+                return browseId
+            }
+        }
+        if let browseId = browseIdFromTextRuns((cols.first?["musicResponsiveListItemFlexColumnRenderer"] as? [String: Any])?["text"]) {
+            return browseId
+        }
+        return ""
+    }
+
+    private func browseIdFromNavigationEndpoint(_ endpoint: [String: Any]?) -> String? {
+        guard let endpoint,
+              let browseId = (endpoint["browseEndpoint"] as? [String: Any])?["browseId"] as? String,
+              !browseId.isEmpty else { return nil }
+        return browseId
+    }
+
+    private func browseIdFromTextRuns(_ obj: Any?) -> String? {
+        guard let dict = obj as? [String: Any] else { return nil }
+        if let browseId = browseIdFromNavigationEndpoint(dict["navigationEndpoint"] as? [String: Any]) {
+            return browseId
+        }
+        for run in dict["runs"] as? [[String: Any]] ?? [] {
+            if let browseId = browseIdFromNavigationEndpoint(run["navigationEndpoint"] as? [String: Any]) {
+                return browseId
+            }
+        }
+        return nil
     }
 
     private func setVideoIdFromRenderer(_ r: [String: Any]) -> String? {
@@ -798,9 +871,9 @@ public actor YTMusicClient: PlatformProtocol {
     // MARK: - Generic helpers
 
     private func firstRunText(_ obj: Any?) -> String {
-        guard let d = obj as? [String: Any],
-              let runs = d["runs"] as? [[String: Any]]
-        else { return "" }
+        guard let d = obj as? [String: Any] else { return "" }
+        if let simple = d["simpleText"] as? String { return simple }
+        guard let runs = d["runs"] as? [[String: Any]] else { return "" }
         return runs.compactMap { $0["text"] as? String }.joined()
     }
 
@@ -815,7 +888,7 @@ public actor YTMusicClient: PlatformProtocol {
 
     private func isArtistTypeText(_ text: String) -> Bool {
         let lower = text.lowercased()
-        return lower.contains("artist") || text == "艺术家"
+        return lower.contains("artist") || text.contains("艺术家") || text.contains("艺人") || text.contains("歌手")
     }
 
     private func collectText(in value: Any) -> [String] {

@@ -69,16 +69,19 @@ public struct NowPlayingBarView: View {
 
     @ViewBuilder private var trackInfoView: some View {
         VStack(alignment: .leading, spacing: 2) {
-            Text(track?.title ?? "未在播放")
-                .font(Theme.font(Theme.fontMD, weight: .semibold))
-                .foregroundStyle(Theme.primaryText).lineLimit(1)
+            HStack(spacing: 6) {
+                if let platform = track?.platform {
+                    PlatformIconView(platform: platform)
+                        .frame(width: 14, height: 14)
+                }
+                Text(track?.title ?? "未在播放")
+                    .font(Theme.font(Theme.fontMD, weight: .semibold))
+                    .foregroundStyle(Theme.primaryText)
+                    .lineLimit(1)
+            }
             Button {
                 guard let t = track else { return }
-                ctrl.pageBeforeArtist = ctrl.currentPage
-                Task {
-                    await ctrl.loadArtist(name: t.artist, platform: t.platform)
-                    ctrl.currentPage = .artist
-                }
+                ctrl.openArtist(name: t.artist, platform: t.platform)
             } label: {
                 Text(track?.artist ?? "选择一首歌曲开始")
                     .font(Theme.font(Theme.fontSM))
@@ -165,10 +168,9 @@ public struct NowPlayingBarView: View {
     private var lyricsButton: some View {
         Button {
             if ctrl.currentPage == .lyrics {
-                ctrl.currentPage = ctrl.pageBeforeLyrics == .lyrics ? .home : ctrl.pageBeforeLyrics
+                ctrl.returnFromLyricsPage()
             } else {
-                ctrl.pageBeforeLyrics = ctrl.currentPage
-                ctrl.currentPage = .lyrics
+                ctrl.openLyricsPage()
             }
         } label: {
             Image(systemName: "text.alignleft")

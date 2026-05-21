@@ -10,6 +10,7 @@ public struct TrackRowView: View {
     let onAddToQueue:    () -> Void
     let onArtistClicked: () -> Void
     let onAddToPlaylist: () -> Void
+    let onRemoveFromPlaylist: (() -> Void)?
 
     @State private var isHovered = false
 
@@ -20,7 +21,8 @@ public struct TrackRowView: View {
         onPlay:          @escaping () -> Void = {},
         onAddToQueue:    @escaping () -> Void = {},
         onArtistClicked: @escaping () -> Void = {},
-        onAddToPlaylist: @escaping () -> Void = {}
+        onAddToPlaylist: @escaping () -> Void = {},
+        onRemoveFromPlaylist: (() -> Void)? = nil
     ) {
         self.track           = track
         self.index           = index
@@ -29,6 +31,7 @@ public struct TrackRowView: View {
         self.onAddToQueue    = onAddToQueue
         self.onArtistClicked = onArtistClicked
         self.onAddToPlaylist = onAddToPlaylist
+        self.onRemoveFromPlaylist = onRemoveFromPlaylist
     }
 
     public var body: some View {
@@ -180,6 +183,10 @@ public struct TrackRowView: View {
         Divider()
         Button("加入歌单…") { onAddToPlaylist() }
         Button("查看艺术家") { onArtistClicked() }
+        if let onRemoveFromPlaylist {
+            Divider()
+            Button("移出歌单") { onRemoveFromPlaylist() }
+        }
     }
 
     // MARK: Helpers

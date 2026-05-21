@@ -16,6 +16,7 @@ public struct AggregateSearchPageView: View {
         ("spotify", "Spotify"),
         ("ytmusic", "YouTube Music")
     ]
+    private let perPlatformResultLimit = 10
 
     public init(ctrl: AppController) {
         self.ctrl = ctrl
@@ -134,7 +135,7 @@ public struct AggregateSearchPageView: View {
 
     private var interleavedItems: [AggregateSearchItem] {
         var items: [AggregateSearchItem] = []
-        for rank in 0..<5 {
+        for rank in 0..<perPlatformResultLimit {
             for platform in platforms {
                 let platformTracks = resultsByPlatform[platform.id] ?? []
                 if platformTracks.indices.contains(rank) {
@@ -208,7 +209,7 @@ public struct AggregateSearchPageView: View {
         await withTaskGroup(of: (String, [Track]).self) { group in
             for platform in platforms {
                 group.addTask {
-                    let tracks = await ctrl.searchTracks(query: query, platform: platform.id, limit: 5)
+                    let tracks = await ctrl.searchTracks(query: query, platform: platform.id, limit: perPlatformResultLimit)
                     return (platform.id, tracks)
                 }
             }
@@ -222,11 +223,7 @@ public struct AggregateSearchPageView: View {
     }
 
     private func navigateToArtist(_ track: Track) {
-        ctrl.pageBeforeArtist = ctrl.currentPage
-        Task {
-            await ctrl.loadArtist(name: track.artist, platform: track.platform)
-            ctrl.currentPage = .artist
-        }
+        ctrl.openArtist(name: track.artist, platform: track.platform)
     }
 }
 
@@ -316,17 +313,10 @@ private struct AggregateTrackRow: View {
     }
 
     @ViewBuilder private var coverCell: some View {
-        if let url = URL(string: track.albumCoverURL), !track.albumCoverURL.isEmpty {
-            AsyncImage(url: url) { phase in
-                switch phase {
-                case .success(let img):
-                    img.resizable().scaledToFill()
-                        .frame(width: 34, height: 34)
-                        .clipShape(RoundedRectangle(cornerRadius: 4))
-                default:
-                    placeholderCover
-                }
-            }
+        if !track.albumCoverURL.isEmpty, URL(string: track.albumCoverURL) != nil {
+            CachedRemoteImage(urlString: track.albumCoverURL)
+                .frame(width: 34, height: 34)
+                .clipShape(RoundedRectangle(cornerRadius: 4))
         } else {
             placeholderCover
         }
