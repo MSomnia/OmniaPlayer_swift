@@ -56,11 +56,7 @@ public struct LyricsView: View {
     private var lyricsScroller: some View {
         ScrollViewReader { proxy in
             ScrollView {
-                // VStack (not LazyVStack) so that scrollTo can resolve item positions
-                // instantly without needing to realize off-screen items first.
-                // For typical lyric counts (50-500 lines), the upfront layout cost
-                // is negligible and eliminates per-scroll O(n) work.
-                VStack(spacing: 4) {
+                LazyVStack(spacing: 4) {
                     Color.clear.frame(height: 120)
 
                     ForEach(lines.indices, id: \.self) { idx in
@@ -76,17 +72,21 @@ public struct LyricsView: View {
                 }
                 .padding(.horizontal, 40)
             }
+            // proxy.scrollTo must run after the current SwiftUI layout pass
+            // commits; calling it synchronously inside onChange fires during
+            // the render cycle and is silently ignored by the scroll view.
             // Jump to the current line without animation when the view first appears
             // (covers both initial open and re-navigation from another page).
             .onAppear {
                 guard currentLineIdx >= 0 else { return }
                 proxy.scrollTo(currentLineIdx, anchor: .center)
             }
-            // Animate scroll on each subsequent line change.
             .onChange(of: currentLineIdx) { idx in
                 guard idx >= 0 else { return }
-                withAnimation(.easeInOut(duration: 0.4)) {
-                    proxy.scrollTo(idx, anchor: .center)
+                DispatchQueue.main.async {
+                    withAnimation(.easeInOut(duration: 0.4)) {
+                        proxy.scrollTo(idx, anchor: .center)
+                    }
                 }
             }
         }
