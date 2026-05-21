@@ -8,7 +8,6 @@ public struct LyricsView: View {
     @State private var lines: [LyricLine] = []
     @State private var currentLineIdx: Int = -1
     @State private var coverRGB: (Int, Int, Int) = (0, 0, 0)
-    @State private var scrollTarget: Int = -1
 
     public init(ctrl: AppController) { self.ctrl = ctrl }
 
@@ -19,7 +18,6 @@ public struct LyricsView: View {
 
     public var body: some View {
         ZStack {
-            // Gradient background from cover color
             LinearGradient(
                 colors: [coverColor.opacity(0.4), Theme.bgBase],
                 startPoint: .top, endPoint: .bottom
@@ -41,7 +39,6 @@ public struct LyricsView: View {
         .onReceive(ctrl.$currentLyrics) { newLines in
             lines = newLines
             currentLineIdx = Self.lineIndex(in: newLines, positionMs: ctrl.playerState.positionMs)
-            scrollTarget = -1
         }
         .onReceive(ctrl.$currentCoverColor) { color in
             coverRGB = color
@@ -59,14 +56,17 @@ public struct LyricsView: View {
     private var lyricsScroller: some View {
         ScrollViewReader { proxy in
             ScrollView {
-                LazyVStack(spacing: 4) {
-                    // Top padding so first line can scroll to center
+                // VStack (not LazyVStack) so that scrollTo can resolve item positions
+                // instantly without needing to realize off-screen items first.
+                // For typical lyric counts (50-500 lines), the upfront layout cost
+                // is negligible and eliminates per-scroll O(n) work.
+                VStack(spacing: 4) {
                     Color.clear.frame(height: 120)
 
                     ForEach(lines.indices, id: \.self) { idx in
                         LyricLineView(
-                            line:       lines[idx],
-                            isCurrent:  idx == currentLineIdx
+                            line:      lines[idx],
+                            isCurrent: idx == currentLineIdx
                         )
                         .equatable()
                         .id(idx)
@@ -76,10 +76,15 @@ public struct LyricsView: View {
                 }
                 .padding(.horizontal, 40)
             }
+            // Jump to the current line without animation when the view first appears
+            // (covers both initial open and re-navigation from another page).
+            .onAppear {
+                guard currentLineIdx >= 0 else { return }
+                proxy.scrollTo(currentLineIdx, anchor: .center)
+            }
+            // Animate scroll on each subsequent line change.
             .onChange(of: currentLineIdx) { idx in
                 guard idx >= 0 else { return }
-                guard idx != scrollTarget else { return }
-                scrollTarget = idx
                 withAnimation(.easeInOut(duration: 0.4)) {
                     proxy.scrollTo(idx, anchor: .center)
                 }
@@ -115,8 +120,8 @@ extension LyricsView: Equatable {
 // MARK: - LyricLineView
 
 struct LyricLineView: View, Equatable {
-    let line:       LyricLine
-    let isCurrent:  Bool
+    let line:      LyricLine
+    let isCurrent: Bool
 
     static func == (lhs: LyricLineView, rhs: LyricLineView) -> Bool {
         lhs.line == rhs.line &&
@@ -124,21 +129,15 @@ struct LyricLineView: View, Equatable {
     }
 
     var body: some View {
-        plainText
-            .multilineTextAlignment(.leading)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .scaleEffect(isCurrent ? 1.0 : 0.95, anchor: .leading)
-        .opacity(isCurrent ? 1.0 : 0.55)
-        .padding(.vertical, isCurrent ? 6 : 3)
-        .animation(.easeInOut(duration: 0.25), value: isCurrent)
-    }
-
-    // Plain text for non-current / line-synced
-    private var plainText: some View {
         Text(line.text)
             .font(isCurrent
                 ? Theme.font(Theme.fontLyrics, weight: .bold)
                 : Theme.font(Theme.fontLG))
             .foregroundStyle(isCurrent ? Theme.lyricsActive : Theme.lyricsFuture)
+            .multilineTextAlignment(.leading)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .opacity(isCurrent ? 1.0 : 0.5)
+            .padding(.vertical, 4)
+            .animation(.easeInOut(duration: 0.2), value: isCurrent)
     }
 }

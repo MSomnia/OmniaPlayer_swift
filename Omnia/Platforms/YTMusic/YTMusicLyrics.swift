@@ -4,18 +4,82 @@ private let lrclibSearchURL = "https://lrclib.net/api/search"
 
 public struct YTMusicLyrics {
 
-    /// Three-tier strategy:
-    /// 1. YTMusic internal lyrics (via /next → /browse)
-    /// 2. LRCLIB.net public API (synced LRC)
-    /// 3. Return empty (no lyrics available)
+    /// Fetch order (most useful first):
+    /// 1. LRCLIB.net — synced LRC, enables lyric scroll
+    /// 2. YTMusic internal — plain text only (no timestamps), shown as static block
+    /// 3. Return empty
     public static func fetch(track: Track, client: YTMusicClient) async throws -> [LyricLine] {
-        // 1. YTMusic internal lyrics
+        if let lines = try? await fetchFromLRCLIB(track: track), !lines.isEmpty {
+            return lines
+        }
         if let lines = try? await fetchFromYTMusic(track: track, client: client), !lines.isEmpty {
             return lines
         }
-        // 2. LRCLIB
-        if let lines = try? await fetchFromLRCLIB(track: track), !lines.isEmpty {
-            return lines
+        return []
+    }
+
+    // MARK: - LRCLIB
+
+    private static func fetchFromLRCLIB(track: Track) async throws -> [LyricLine] {
+        let rawTitle = normalizedSongTitle(track.title)
+        let artist   = normalizedArtist(track.artist)
+        guard !rawTitle.isEmpty else { return [] }
+
+        // Try the normalized title first, then strip a leading "Artist - " prefix.
+        // Many YTMusic video titles use "Artist Name - Song Title" format which
+        // doesn't match LRCLIB entries stored under just "Song Title".
+        var candidates = [rawTitle]
+        for sep in [" - ", " – ", " — "] {
+            if let sepRange = rawTitle.range(of: sep) {
+                let stripped = String(rawTitle[sepRange.upperBound...])
+                    .trimmingCharacters(in: .whitespaces)
+                if !stripped.isEmpty && stripped != rawTitle {
+                    candidates.append(stripped)
+                    break
+                }
+            }
+        }
+
+        for title in candidates {
+            if let lines = try? await queryLRCLIB(title: title, artist: artist), !lines.isEmpty {
+                return lines
+            }
+        }
+        return []
+    }
+
+    private static func queryLRCLIB(title: String, artist: String) async throws -> [LyricLine] {
+        var comps = URLComponents(string: lrclibSearchURL)!
+        comps.queryItems = [
+            URLQueryItem(name: "track_name",  value: title),
+            URLQueryItem(name: "artist_name", value: artist),
+        ]
+        guard let url = comps.url else { return [] }
+
+        var request = URLRequest(url: url, timeoutInterval: 6)
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode),
+              let results = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]]
+        else { return [] }
+
+        for item in results {
+            if let synced = item["syncedLyrics"] as? String, !synced.isEmpty {
+                let lines = LRCParser.parse(synced)
+                if !lines.isEmpty { return lines }
+            }
+        }
+        for item in results {
+            if let plain = item["plainLyrics"] as? String,
+               !plain.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                return [LyricLine(
+                    startMs: 0,
+                    endMs: Int.max,
+                    text: plain.trimmingCharacters(in: .whitespacesAndNewlines),
+                    words: []
+                )]
+            }
         }
         return []
     }
@@ -25,21 +89,16 @@ public struct YTMusicLyrics {
     private static func fetchFromYTMusic(track: Track, client: YTMusicClient) async throws -> [LyricLine] {
         guard !track.id.isEmpty else { return [] }
 
-        // Step 1: GET /next to find the lyrics browseId
         let nextResp = try await client.innertube("next", body: ["videoId": track.id])
         guard let browseId = extractLyricsBrowseId(from: nextResp), !browseId.isEmpty else {
             return []
         }
 
-        // Step 2: browse the lyrics endpoint
         let browseResp = try await client.innertube("browse", body: ["browseId": browseId])
 
-        // Lyrics live in sectionListRenderer → musicDescriptionShelfRenderer → description
         let text = extractLyricsText(from: browseResp)
         guard !text.isEmpty else { return [] }
 
-        // YTMusic returns plain text lyrics without timestamps — return as a single line
-        // (LyricsEngine will display them as static text)
         return [LyricLine(startMs: 0, endMs: Int.max, text: text, words: [])]
     }
 
@@ -77,46 +136,28 @@ public struct YTMusicLyrics {
         return text
     }
 
-    // MARK: - LRCLIB
+    // MARK: - Normalizers
 
-    private static func fetchFromLRCLIB(track: Track) async throws -> [LyricLine] {
-        let title = normalizedSongTitle(track.title)
-        let artist = normalizedArtist(track.artist)
-        guard !title.isEmpty else { return [] }
-        var comps = URLComponents(string: lrclibSearchURL)!
-        comps.queryItems = [
-            URLQueryItem(name: "track_name",  value: title),
-            URLQueryItem(name: "artist_name", value: artist),
-        ]
-        guard let url = comps.url else { return [] }
+    private static func normalizedSongTitle(_ raw: String) -> String {
+        raw
+            .replacingOccurrences(
+                of: #"\s*[\(\[（【].*?(official|audio|video|mv|lyrics?|歌词|动态歌词|完整版|高音质).*?[\)\]）】]"#,
+                with: "",
+                options: [.regularExpression, .caseInsensitive]
+            )
+            .replacingOccurrences(
+                of: #"\s*[-–—]\s*(official|audio|video|mv|lyrics?|歌词).*$"#,
+                with: "",
+                options: [.regularExpression, .caseInsensitive]
+            )
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
 
-        var request = URLRequest(url: url, timeoutInterval: 6)
-        request.setValue("application/json", forHTTPHeaderField: "Accept")
-
-        let (data, response) = try await URLSession.shared.data(for: request)
-        guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode),
-              let results = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]]
-        else { return [] }
-
-        for item in results {
-            if let synced = item["syncedLyrics"] as? String, !synced.isEmpty {
-                let lines = LRCParser.parse(synced)
-                if !lines.isEmpty { return lines }
-            }
-        }
-
-        for item in results {
-            if let plain = item["plainLyrics"] as? String,
-               !plain.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                return [LyricLine(
-                    startMs: 0,
-                    endMs: Int.max,
-                    text: plain.trimmingCharacters(in: .whitespacesAndNewlines),
-                    words: []
-                )]
-            }
-        }
-        return []
+    private static func normalizedArtist(_ raw: String) -> String {
+        raw
+            .components(separatedBy: CharacterSet(charactersIn: ",/&、•"))
+            .first?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? raw
     }
 
     // MARK: - JSON helpers
@@ -181,27 +222,5 @@ public struct YTMusicLyrics {
             return runs.compactMap { $0["text"] as? String }.joined()
         }
         return ""
-    }
-
-    private static func normalizedSongTitle(_ raw: String) -> String {
-        raw
-            .replacingOccurrences(
-                of: #"\s*[\(\[（【].*?(official|audio|video|mv|lyrics?|歌词|动态歌词|完整版|高音质).*?[\)\]）】]"#,
-                with: "",
-                options: [.regularExpression, .caseInsensitive]
-            )
-            .replacingOccurrences(
-                of: #"\s*[-–—]\s*(official|audio|video|mv|lyrics?|歌词).*$"#,
-                with: "",
-                options: [.regularExpression, .caseInsensitive]
-            )
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-    }
-
-    private static func normalizedArtist(_ raw: String) -> String {
-        raw
-            .components(separatedBy: CharacterSet(charactersIn: ",/&、•"))
-            .first?
-            .trimmingCharacters(in: .whitespacesAndNewlines) ?? raw
     }
 }
