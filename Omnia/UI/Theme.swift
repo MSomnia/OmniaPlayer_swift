@@ -51,7 +51,7 @@ public enum Theme {
 
     public static let spotifyColor  = Color(hex: "#1DB954")
     public static let ytMusicColor  = Color(hex: "#FF0000")
-    public static let neteaseColor  = Color(hex: "#E60026")
+    public static let neteaseColor  = Color(hex: "#F97316")
 
     // MARK: - Structural
 

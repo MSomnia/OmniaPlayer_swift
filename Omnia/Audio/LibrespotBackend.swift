@@ -75,17 +75,24 @@ public final class LibrespotBackend {
     /// (librespot session created). Safe to call multiple times — no-ops
     /// if the daemon is already running.
     public func startDaemon(accessToken: String, volume: Int) async {
+        let clampedVolume = max(0, min(volume, 100))
+        self.volume = Float(clampedVolume) / 100.0
+
         // If a start is already in progress, wait for it instead of racing.
         if let existing = daemonStartTask {
             _ = try? await existing.value
+            setVolume(clampedVolume)
             return
         }
         // Already healthy — nothing to do.
-        if isDaemonReady, daemonProcess?.isRunning == true { return }
+        if isDaemonReady, daemonProcess?.isRunning == true {
+            setVolume(clampedVolume)
+            return
+        }
 
         let task = Task<Void, Error> { [weak self] in
             guard let self else { return }
-            try await self._doStartDaemon(accessToken: accessToken, volume: volume)
+            try await self._doStartDaemon(accessToken: accessToken, volume: clampedVolume)
         }
         daemonStartTask = task
         _ = try? await task.value
@@ -160,6 +167,8 @@ public final class LibrespotBackend {
 
     private func _doStartDaemon(accessToken: String, volume: Int) async throws {
         _killDaemonProcess()
+        let clampedVolume = max(0, min(volume, 100))
+        self.volume = Float(clampedVolume) / 100.0
 
         guard let python = await resolveHelperPython() else {
             throw LibrespotBackendError.pythonNotFound
@@ -169,12 +178,22 @@ public final class LibrespotBackend {
             throw LibrespotBackendError.helperNotFound
         }
 
+        // librespot-python defaults to os.getcwd() for credentials.json.
+        // When launched from Finder the CWD is "/" (not writable), which
+        // makes Session.Builder().create() fail. Use Application Support instead.
+        let appSupportDir = FileManager.default
+            .urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("Omnia")
+        try? FileManager.default.createDirectory(
+            at: appSupportDir, withIntermediateDirectories: true)
+
         let outPipe = Pipe()
         let inPipe  = Pipe()
         let errPipe = Pipe()
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: python)
-        proc.arguments = [helper, accessToken, String(max(0, min(volume, 100)))]
+        proc.arguments = [helper, accessToken, String(clampedVolume)]
+        proc.currentDirectoryURL = appSupportDir
         proc.environment = ExecutableResolver.environmentWithExpandedPATH()
         proc.standardInput  = inPipe
         proc.standardOutput = outPipe
@@ -277,6 +296,7 @@ public final class LibrespotBackend {
             framesPlayed = Int64(Double(ms) / 1000.0 * sampleRate)
             onPositionChanged?(ms)
         case "END":
+            guard !didReachEnd else { return }
             if didStartPlayback && maxReportedPositionMs > 1000 {
                 didReachEnd = true
                 onEndReached?()

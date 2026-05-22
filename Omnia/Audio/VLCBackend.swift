@@ -35,6 +35,8 @@ public final class VLCBackend: NSObject {
     private var vlcPlayer: VLCMediaPlayer?
     private var pollTimer: Timer?
     private var reportedDuration: Int = 0
+    private var didReportEnd = false
+    private var desiredVolume: Int = 70
 
     public override init() {
         super.init()
@@ -55,6 +57,8 @@ public final class VLCBackend: NSObject {
         }
         stopPoll()
         reportedDuration = 0
+        didReportEnd = false
+        p.stop()
         let media = VLCMedia(url: u)
         if let ua = httpUA {
             media.addOption(":http-user-agent=\(ua)")
@@ -67,15 +71,19 @@ public final class VLCBackend: NSObject {
         media.addOption(":http-reconnect=true")
         NSLog("[VLCBackend] play via VLCKit url=\(url.prefix(80)) ua=\(httpUA != nil) referer=\(httpHeaders["Referer"] != nil)")
         p.media = media
+        applyVolume(to: p)
         p.play()
         startPoll()
     }
 
     public func pause()              { vlcPlayer?.pause() }
     public func resume()             { vlcPlayer?.play() }
-    public func stop()               { stopPoll(); vlcPlayer?.stop() }
+    public func stop()               { stopPoll(); didReportEnd = false; vlcPlayer?.stop() }
     public func seek(to ms: Int)     { vlcPlayer?.time = VLCTime(int: Int32(ms)) }
-    public func setVolume(_ v: Int)  { vlcPlayer?.audio?.volume = Int32(max(0, min(v, 200))) }
+    public func setVolume(_ v: Int)  {
+        desiredVolume = max(0, min(v, 100))
+        if let vlcPlayer { applyVolume(to: vlcPlayer) }
+    }
 
     public var positionMs: Int { Int(vlcPlayer?.time.intValue ?? 0) }
     public var durationMs:  Int { Int(vlcPlayer?.media?.length.intValue ?? 0) }
@@ -97,6 +105,10 @@ public final class VLCBackend: NSObject {
     }
     private func stopPoll() { pollTimer?.invalidate(); pollTimer = nil }
 
+    private func applyVolume(to player: VLCMediaPlayer) {
+        player.audio?.volume = Int32(desiredVolume)
+    }
+
 #else
     // ── AVFoundation fallback ─────────────────────────────────────────────────
 
@@ -106,12 +118,15 @@ public final class VLCBackend: NSObject {
     private var failObserver: NSObjectProtocol?
     private var statusObserver: NSKeyValueObservation?
     private var reportedDuration: Int = 0
+    private var didReportEnd = false
+    private var desiredVolume: Int = 70
 
     public override init() { super.init() }
 
     public func play(url: String, httpUA: String? = nil, httpHeaders: [String: String] = [:]) {
         stop()
         reportedDuration = 0
+        didReportEnd = false
         guard let mediaURL = URL(string: url) else {
             onError?("Invalid URL")
             return
@@ -128,6 +143,7 @@ public final class VLCBackend: NSObject {
         let p = AVPlayer(playerItem: item)
         p.automaticallyWaitsToMinimizeStalling = false
         p.allowsExternalPlayback = false
+        applyVolume(to: p)
         avPlayer = p
         statusObserver = item.observe(\.status, options: [.new]) { [weak self] item, _ in
             guard item.status == .failed else { return }
@@ -154,7 +170,11 @@ public final class VLCBackend: NSObject {
         endObserver = NotificationCenter.default.addObserver(
             forName: .AVPlayerItemDidPlayToEndTime, object: item, queue: .main
         ) { [weak self] _ in
-            Task { @MainActor [weak self] in self?.onEndReached?() }
+            Task { @MainActor [weak self] in
+                guard let self, !self.didReportEnd else { return }
+                self.didReportEnd = true
+                self.onEndReached?()
+            }
         }
 
         failObserver = NotificationCenter.default.addObserver(
@@ -177,6 +197,7 @@ public final class VLCBackend: NSObject {
         statusObserver?.invalidate(); statusObserver = nil
         avPlayer = nil
         reportedDuration = 0
+        didReportEnd = false
     }
 
     public func seek(to ms: Int) {
@@ -185,7 +206,12 @@ public final class VLCBackend: NSObject {
     }
 
     public func setVolume(_ volume: Int) {
-        avPlayer?.volume = Float(max(0, min(volume, 100))) / 100.0
+        desiredVolume = max(0, min(volume, 100))
+        if let avPlayer { applyVolume(to: avPlayer) }
+    }
+
+    private func applyVolume(to player: AVPlayer) {
+        player.volume = Float(desiredVolume) / 100.0
     }
 
     public var positionMs: Int {
@@ -214,6 +240,8 @@ extension VLCBackend: VLCMediaPlayerDelegate {
             NSLog("[VLCBackend] state=\(stateName) position=\(self.positionMs) duration=\(self.durationMs) error=\(message ?? "nil")")
             switch self.vlcPlayer?.state {
             case .ended:
+                guard !self.didReportEnd else { return }
+                self.didReportEnd = true
                 self.stopPoll()
                 self.onEndReached?()
             case .error:

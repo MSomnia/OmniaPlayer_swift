@@ -457,22 +457,26 @@ public struct SettingsPageView: View {
     // MARK: - Section: About
 
     private var aboutSection: some View {
-        HStack(spacing: 12) {
-            Image(systemName: "music.note")
-                .font(.system(size: Theme.fontLG))
-                .foregroundStyle(Theme.accent)
-
-            VStack(alignment: .leading, spacing: 4) {
-                Text("Omnia")
-                    .font(Theme.font(Theme.fontMD, weight: .semibold))
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 4) {
+                Text("开发者：")
                     .foregroundStyle(Theme.primaryText)
-                Text("版本 \(appVersion)")
-                    .font(Theme.font(Theme.fontSM))
-                    .foregroundStyle(Theme.secondaryText)
+                Link("@MSomnia", destination: URL(string: "https://github.com/MSomnia")!)
+                    .foregroundStyle(Theme.accent)
             }
 
-            Spacer()
+            HStack(spacing: 4) {
+                Text("Github：")
+                    .foregroundStyle(Theme.primaryText)
+                Link(
+                    "MSomnia/OmniaPlayer_swift",
+                    destination: URL(string: "https://github.com/MSomnia/OmniaPlayer_swift")!
+                )
+                .foregroundStyle(Theme.accent)
+            }
         }
+        .font(Theme.font(Theme.fontSM))
+        .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal, 16)
         .padding(.vertical, 12)
         .background(Theme.bgElevated)

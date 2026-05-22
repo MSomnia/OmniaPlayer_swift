@@ -98,6 +98,7 @@ public final class AppController: ObservableObject {
     private var prefetchedAutoplay: [Track]?
     private var initialContentPreloadTask: Task<Void, Never>?
     private var centerToastTask: Task<Void, Never>?
+    private var autoAdvanceKey: String?
 
     // Seek suppression: VLC keeps polling the old position for ~300-500 ms after
     // a seek command, causing positionMs (and lyric highlight) to briefly revert.
@@ -172,7 +173,11 @@ public final class AppController: ObservableObject {
 
         // Restore volume / shuffle / repeat
         if let volStr = try? await repo.getSetting("volume"), let vol = Int(volStr) {
-            playerMachine.setVolume(vol)
+            let restoredVolume = max(0, min(vol, 100))
+            playerMachine.setVolume(restoredVolume)
+            applyVolumeToBackends(restoredVolume)
+        } else {
+            applyVolumeToBackends(playerMachine.state.volume)
         }
         if let shuffle = try? await repo.getSetting("shuffle") {
             playerMachine.setShuffle(shuffle == "true")
@@ -294,6 +299,7 @@ public final class AppController: ObservableObject {
     private func onPositionTick(_ ms: Int) {
         let state = playerMachine.state
         macosMedia.updatePosition(ms, isPlaying: state.status == .playing)
+        autoAdvanceIfNeeded(positionMs: ms, state: state)
 
         // Prefetch logic (mirrors Python _on_position_changed)
         guard state.status == .playing,
@@ -315,6 +321,24 @@ public final class AppController: ObservableObject {
                 await self?.prefetchNext()
                 await MainActor.run { self?.prefetchTask = nil }
             }
+        }
+    }
+
+    private func autoAdvanceIfNeeded(positionMs ms: Int, state: PlayerState) {
+        guard state.status == .playing,
+              let track = state.currentTrack,
+              state.durationMs > 0,
+              playQueue.peekNext(repeatMode: state.repeatMode) != nil else { return }
+
+        let remainingMs = state.durationMs - ms
+        guard remainingMs <= 500 else { return }
+
+        let key = "\(track.platform):\(track.id):\(playQueue.currentIndex)"
+        guard autoAdvanceKey != key else { return }
+        autoAdvanceKey = key
+
+        Task { [weak self] in
+            await self?.playNext()
         }
     }
 
@@ -567,6 +591,7 @@ public final class AppController: ObservableObject {
         // Reset prefetch
         prefetchTask?.cancel(); prefetchTask = nil
         prefetchDone = false; prefetchedAutoplay = nil
+        autoAdvanceKey = nil
 
         // Ensure track is in queue
         if playQueue.currentTrack?.id != track.id {
@@ -738,10 +763,15 @@ public final class AppController: ObservableObject {
 
     public func setVolume(_ volume: Int) {
         let v = max(0, min(volume, 100))
-        vlc.setVolume(v)
-        librespotBackend.setVolume(v)
+        applyVolumeToBackends(v)
         playerMachine.setVolume(v)
         Task { try? await repo.setSetting("volume", value: String(v)) }
+    }
+
+    private func applyVolumeToBackends(_ volume: Int) {
+        let v = max(0, min(volume, 100))
+        vlc.setVolume(v)
+        librespotBackend.setVolume(v)
     }
 
     public func toggleShuffle() {

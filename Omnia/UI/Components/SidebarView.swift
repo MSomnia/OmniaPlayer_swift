@@ -23,9 +23,9 @@ public struct SidebarView: View {
                 .onTapGesture { currentPage = .standby }
 
             // Navigation items
-            navItem(label: "首页", icon: "house.fill",      page: .home)
-            navItem(label: "搜索", icon: "magnifyingglass", page: .search)
-            navItem(label: "聚合搜索", icon: "square.grid.2x2", page: .aggregateSearch)
+            navItem(label: "首页", icon: "house.fill",      page: .home, activeIconColor: .white, indicatorColor: .white)
+            navItem(label: "搜索", icon: "magnifyingglass", page: .search, activeIconColor: .white, indicatorColor: .white)
+            navItem(label: "聚合搜索", icon: "square.grid.2x2", page: .aggregateSearch, activeIconColor: .white, indicatorColor: .white)
 
             Divider()
                 .background(Theme.divider)
@@ -77,18 +77,24 @@ public struct SidebarView: View {
     // MARK: - Helpers
 
     @ViewBuilder
-    private func navItem(label: String, icon: String, page: PageID) -> some View {
+    private func navItem(
+        label: String,
+        icon: String,
+        page: PageID,
+        activeIconColor: Color = Theme.accent,
+        indicatorColor: Color = Theme.accent
+    ) -> some View {
         let active = currentPage == page
         HStack(spacing: 10) {
             if active {
                 Rectangle()
-                    .fill(Theme.accent)
+                    .fill(indicatorColor)
                     .frame(width: 3)
             } else {
                 Color.clear.frame(width: 3)
             }
             Image(systemName: icon)
-                .foregroundStyle(active ? Theme.accent : Theme.secondaryText)
+                .foregroundStyle(active ? activeIconColor : Theme.secondaryText)
                 .frame(width: 18)
             Text(label)
                 .font(Theme.font(Theme.fontMD, weight: active ? .semibold : .regular))
@@ -110,7 +116,7 @@ public struct SidebarView: View {
             // Active accent bar
             if isActive {
                 Rectangle()
-                    .fill(Theme.accent)
+                    .fill(platformColor)
                     .frame(width: 3)
             } else {
                 Color.clear.frame(width: 3)
