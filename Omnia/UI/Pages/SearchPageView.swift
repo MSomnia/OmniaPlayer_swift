@@ -219,46 +219,8 @@ public struct SearchPageView: View {
     private var resultsView: some View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 0) {
-                // Albums section
-                if !currentAlbums.isEmpty {
-                    SectionHeader(title: "专辑")
-                        .padding(.horizontal, 20)
-                        .padding(.top, 16)
-                        .padding(.bottom, 6)
-
-                    AlbumResultListView(albums: currentAlbums) { album in
-                        openAlbum(album)
-                    }
-                    .padding(.bottom, ctrl.searchResults.isEmpty ? 16 : 10)
-                }
-
-                // Tracks section
-                if !ctrl.searchResults.isEmpty {
-                    SectionHeader(title: "歌曲")
-                        .padding(.horizontal, 20)
-                        .padding(.top, currentAlbums.isEmpty ? 16 : 8)
-                        .padding(.bottom, 6)
-
-                    TrackListView(
-                        tracks: ctrl.searchResults,
-                        currentTrackID: ctrl.playerState.currentTrack?.id,
-                        onPlay: { track in
-                            let idx = ctrl.searchResults.firstIndex(of: track) ?? 0
-                            ctrl.playQueueTracks(ctrl.searchResults, startAt: idx)
-                            Task { await ctrl.addSearchHistory(query: query, platform: selectedPlatform) }
-                        },
-                        onAddToQueue: { track in
-                            ctrl.addToQueue(track)
-                        },
-                        onArtistClicked: { track in
-                            navigateToArtist(track)
-                        },
-                        onAddToPlaylist: { _ in }
-                    )
-                    // TrackListView has its own ScrollView internally, so we cap height
-                    // by disabling the inner scroll and letting the outer one manage.
-                    .frame(height: CGFloat(min(ctrl.searchResults.count, 10)) * 58)
-                    .disabled(false)
+                if !ctrl.searchResults.isEmpty || !currentAlbums.isEmpty {
+                    searchResultsColumn
                 }
 
                 // Empty state
@@ -276,6 +238,55 @@ public struct SearchPageView: View {
                     }
                     .frame(maxWidth: .infinity)
                     .padding(.top, 60)
+                }
+            }
+        }
+    }
+
+    private var searchResultsColumn: some View {
+        LazyVStack(alignment: .leading, spacing: 0) {
+            if !currentAlbums.isEmpty {
+                SectionHeader(title: "专辑")
+                    .padding(.horizontal, 20)
+                    .padding(.top, 16)
+                    .padding(.bottom, 6)
+
+                AlbumResultListView(albums: currentAlbums) { album in
+                    openAlbum(album)
+                }
+                .padding(.bottom, ctrl.searchResults.isEmpty ? 16 : 10)
+            }
+
+            if !ctrl.searchResults.isEmpty {
+                SectionHeader(title: "歌曲")
+                    .padding(.horizontal, 20)
+                    .padding(.top, currentAlbums.isEmpty ? 16 : 8)
+                    .padding(.bottom, 6)
+
+                LazyVStack(spacing: 0) {
+                    ForEach(Array(ctrl.searchResults.enumerated()), id: \.element.id) { idx, track in
+                        TrackRowView(
+                            track: track,
+                            index: idx + 1,
+                            isCurrentTrack: track.id == ctrl.playerState.currentTrack?.id,
+                            onPlay: {
+                                ctrl.playQueueTracks(ctrl.searchResults, startAt: idx)
+                                Task { await ctrl.addSearchHistory(query: query, platform: selectedPlatform) }
+                            },
+                            onAddToQueue: {
+                                ctrl.addToQueue(track)
+                            },
+                            onArtistClicked: {
+                                navigateToArtist(track)
+                            },
+                            onAddToPlaylist: {}
+                        )
+                        if idx < ctrl.searchResults.count - 1 {
+                            Divider()
+                                .background(Theme.divider)
+                                .padding(.leading, 52)
+                        }
+                    }
                 }
             }
         }
