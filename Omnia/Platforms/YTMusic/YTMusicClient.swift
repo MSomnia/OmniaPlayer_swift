@@ -133,10 +133,10 @@ public actor YTMusicClient: PlatformProtocol {
 
     public func getRecommendations(track: Track) async throws -> [Track] {
         guard !track.id.isEmpty else { return [] }
+        // Match ytmusicapi get_watch_playlist: no params by default, RDAMVM for autoplay mix
         let resp = try await innertube("next", body: [
             "videoId":    track.id,
             "playlistId": "RDAMVM\(track.id)",
-            "params":     "OAHyAQIIAQ==",
         ])
         return parseWatchPlaylistTracks(resp)
     }

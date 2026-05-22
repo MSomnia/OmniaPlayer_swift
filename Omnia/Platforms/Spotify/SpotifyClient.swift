@@ -260,6 +260,7 @@ public actor SpotifyClient: PlatformProtocol {
 
     public func getRecommendations(track: Track) async throws -> [Track] {
         let token = try await auth.getAccessToken()
+        // /recommendations was deprecated Nov 2024; try it but don't rely on it
         if let data = try? await webAPIGet(
             path: "/recommendations",
             token: token,
@@ -269,7 +270,18 @@ public actor SpotifyClient: PlatformProtocol {
                 .compactMap { t -> Track? in guard t["id"] is String else { return nil }; return toWebAPITrack(t) }
             if !tracks.isEmpty { return tracks }
         }
-        return (try? await search(query: track.artist, limit: 12)) ?? []
+        // Fallback: Web API track search (returns structured track objects, not autocomplete)
+        let q = [track.title, track.artist].filter { !$0.isEmpty }.joined(separator: " ")
+        if let data = try? await webAPIGet(
+            path: "/search",
+            token: token,
+            query: ["q": q, "type": "track", "limit": "12", "market": "from_token"]
+        ) {
+            let items = (data["tracks"] as? [String: Any])?["items"] as? [[String: Any]] ?? []
+            let tracks = items.compactMap { toWebAPITrack($0) }.filter { !$0.id.isEmpty }
+            if !tracks.isEmpty { return tracks }
+        }
+        return []
     }
 
     // MARK: - Artist
