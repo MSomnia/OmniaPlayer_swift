@@ -301,7 +301,14 @@ public struct SearchPageView: View {
                 group.addTask { _ = await ctrl.search(query: trimmed, platform: platform) }
                 group.addTask { await ctrl.searchAlbums(query: trimmed, platform: platform) }
             }
-            await MainActor.run { isSearching = false }
+            await ctrl.addSearchHistory(query: trimmed, platform: platform)
+            let updatedHistory = await ctrl.searchHistory(for: platform)
+            await MainActor.run {
+                if selectedPlatform == platform {
+                    history = updatedHistory
+                }
+                isSearching = false
+            }
         }
     }
 

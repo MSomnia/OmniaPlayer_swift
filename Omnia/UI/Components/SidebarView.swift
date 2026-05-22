@@ -13,7 +13,7 @@ public struct SidebarView: View {
         VStack(alignment: .leading, spacing: 0) {
 
             // App name — tap to open standby view
-            Text("Omnia")
+            Text(greetingWithName)
                 .font(Theme.font(Theme.fontLG, weight: .bold))
                 .foregroundStyle(Theme.primaryText)
                 .padding(.horizontal, 20)
@@ -48,6 +48,19 @@ public struct SidebarView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(Theme.panelBackground(hasBackgroundImage: !ctrl.backgroundImagePath.isEmpty))
+    }
+
+    // MARK: - Greeting
+
+    private var greetingWithName: String {
+        let hour = Calendar.current.component(.hour, from: Date())
+        let prefix: String
+        switch hour {
+        case 5..<12: prefix = "早安，"
+        case 12..<18: prefix = "午安，"
+        default: prefix = "晚安，"
+        }
+        return prefix + ctrl.displayName
     }
 
     // MARK: - Section label

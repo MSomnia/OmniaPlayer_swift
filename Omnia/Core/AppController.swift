@@ -50,6 +50,7 @@ public final class AppController: ObservableObject {
     @Published public private(set) var artistInfo: Artist? = nil
     @Published public private(set) var artistTracks: [Track] = []
     @Published public private(set) var updateStatus: UpdateStatus? = nil
+    @Published public private(set) var canCheckForUpdates: Bool = false
     @Published public private(set) var lastPlaylistError: String = ""
     @Published public private(set) var centerToast: AppToast? = nil
 
@@ -80,6 +81,7 @@ public final class AppController: ObservableObject {
     private let spotifyAuth: SpotifyAuth
     private let librespotBridge: LibrespotBridge
     private let macosMedia: MacOSMediaHandler
+    private let releaseUpdater: GitHubReleaseUpdateService
 
     // MARK: Caches
 
@@ -107,6 +109,14 @@ public final class AppController: ObservableObject {
 
     private var cancellables = Set<AnyCancellable>()
 
+    public var appVersionText: String {
+        releaseUpdater.currentVersionText
+    }
+
+    public var updateSourceText: String {
+        releaseUpdater.updateSourceText
+    }
+
     // MARK: - Init
 
     public init() {
@@ -124,6 +134,7 @@ public final class AppController: ObservableObject {
         ytmAuth       = YTMusicAuth(repository: repo)
         spotifyAuth   = SpotifyAuth(repository: repo)
         macosMedia    = MacOSMediaHandler()
+        releaseUpdater = GitHubReleaseUpdateService()
 
         // Mirror PlayerStateMachine.state into our @Published playerState
         playerMachine.$state
@@ -137,6 +148,14 @@ public final class AppController: ObservableObject {
         playQueue.$currentIndex
             .receive(on: RunLoop.main)
             .assign(to: &$queueIndex)
+
+        releaseUpdater.$status
+            .receive(on: RunLoop.main)
+            .assign(to: &$updateStatus)
+
+        releaseUpdater.$canCheckForUpdates
+            .receive(on: RunLoop.main)
+            .assign(to: &$canCheckForUpdates)
     }
 
     // MARK: - Initialization
@@ -146,7 +165,10 @@ public final class AppController: ObservableObject {
 
         // Restore display name and background
         displayName         = (try? await repo.getSetting("display_name")) ?? "Omnia"
-        backgroundImagePath = (try? await repo.getSetting("background_image_path")) ?? ""
+        let savedBgPath     = (try? await repo.getSetting("background_image_path")) ?? ""
+        backgroundImagePath = savedBgPath.isEmpty
+            ? (Bundle.module.path(forResource: "default", ofType: "PNG", inDirectory: "pics") ?? "")
+            : savedBgPath
 
         // Restore volume / shuffle / repeat
         if let volStr = try? await repo.getSetting("volume"), let vol = Int(volStr) {
@@ -1205,15 +1227,14 @@ public final class AppController: ObservableObject {
         try? await repo.setSetting(key, value: v)
     }
 
-    // MARK: - Update check (stub — git-based update applies to Python; Swift uses Sparkle/manual)
+    // MARK: - Update check
 
     public func checkForUpdate() async {
-        // Phase 16 will implement proper update checking.
-        updateStatus = UpdateStatus(available: false)
+        await releaseUpdater.checkForUpdates()
     }
 
     public func applyUpdate() async {
-        // Phase 16.
+        releaseUpdater.openLatestReleasePage()
     }
 
     // MARK: - Cleanup

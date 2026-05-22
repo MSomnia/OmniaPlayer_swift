@@ -7,6 +7,7 @@ public struct AggregateSearchPageView: View {
     @ObservedObject var ctrl: AppController
 
     @State private var query: String = ""
+    @State private var history: [String] = []
     @State private var resultsByPlatform: [String: [Track]] = [:]
     @State private var isSearching = false
     @State private var debounceTask: Task<Void, Never>? = nil
@@ -17,6 +18,7 @@ public struct AggregateSearchPageView: View {
         ("ytmusic", "YouTube Music")
     ]
     private let perPlatformResultLimit = 10
+    private let historyPlatform = "aggregate"
 
     public init(ctrl: AppController) {
         self.ctrl = ctrl
@@ -30,7 +32,7 @@ public struct AggregateSearchPageView: View {
 
             ZStack {
                 if query.trimmingCharacters(in: .whitespaces).isEmpty {
-                    emptyPrompt
+                    historyView
                 } else if isSearching && interleavedItems.isEmpty {
                     loadingView
                 } else {
@@ -40,6 +42,7 @@ public struct AggregateSearchPageView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .background(Theme.surfaceBackground(hasBackgroundImage: !ctrl.backgroundImagePath.isEmpty))
+        .task { await loadHistory() }
     }
 
     private var header: some View {
@@ -133,6 +136,73 @@ public struct AggregateSearchPageView: View {
         }
     }
 
+    private var historyView: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
+                if history.isEmpty {
+                    emptyPrompt
+                        .frame(maxWidth: .infinity)
+                        .padding(.top, 60)
+                } else {
+                    HStack {
+                        Text("搜索历史")
+                            .font(Theme.font(Theme.fontSM, weight: .semibold))
+                            .foregroundStyle(Theme.secondaryText)
+                        Spacer()
+                        Button("清除历史") {
+                            Task {
+                                await ctrl.clearSearchHistory(for: historyPlatform)
+                                history = []
+                            }
+                        }
+                        .buttonStyle(.plain)
+                        .font(Theme.font(Theme.fontSM))
+                        .foregroundStyle(Theme.accentDim)
+                    }
+                    .padding(.horizontal, 20)
+                    .padding(.top, 16)
+
+                    LazyVStack(spacing: 0) {
+                        ForEach(Array(history.enumerated()), id: \.element) { idx, item in
+                            Button {
+                                query = item
+                                triggerDebounce(delay: 0)
+                            } label: {
+                                HStack(spacing: 10) {
+                                    Image(systemName: "clock")
+                                        .font(.system(size: 12))
+                                        .foregroundStyle(Theme.mutedText)
+
+                                    Text(item)
+                                        .font(Theme.font(Theme.fontMD))
+                                        .foregroundStyle(Theme.primaryText)
+                                        .lineLimit(1)
+
+                                    Spacer()
+
+                                    Image(systemName: "arrow.up.left")
+                                        .font(.system(size: 11))
+                                        .foregroundStyle(Theme.mutedText)
+                                }
+                                .padding(.horizontal, 12)
+                                .frame(height: 42)
+                                .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+
+                            if idx < history.count - 1 {
+                                Divider()
+                                    .background(Theme.divider)
+                                    .padding(.leading, 34)
+                            }
+                        }
+                    }
+                    .padding(.horizontal, 20)
+                }
+            }
+        }
+    }
+
     private var interleavedItems: [AggregateSearchItem] {
         var items: [AggregateSearchItem] = []
         for rank in 0..<perPlatformResultLimit {
@@ -198,8 +268,11 @@ public struct AggregateSearchPageView: View {
             await MainActor.run { isSearching = true }
             let searchResults = await searchAllPlatforms(query: trimmed)
             guard !Task.isCancelled else { return }
+            await ctrl.addSearchHistory(query: trimmed, platform: historyPlatform)
+            let updatedHistory = await ctrl.searchHistory(for: historyPlatform)
             await MainActor.run {
                 resultsByPlatform = searchResults
+                history = updatedHistory
                 isSearching = false
             }
         }
@@ -220,6 +293,10 @@ public struct AggregateSearchPageView: View {
             }
             return grouped
         }
+    }
+
+    private func loadHistory() async {
+        history = await ctrl.searchHistory(for: historyPlatform)
     }
 
     private func navigateToArtist(_ track: Track) {

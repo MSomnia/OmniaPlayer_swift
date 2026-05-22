@@ -4,12 +4,12 @@ import Foundation
 // MARK: - StatusItemManager
 //
 // Mirrors Python core/macos_media.py status-bar section.
-// Displays  ♪/Ⅱ + scrolling track title in the macOS menu bar.
+// Displays  ♪/Ⅱ + scrolling track title/artist in the macOS menu bar.
 //
 // Constants (matching Python):
-//   _STATUS_VISIBLE_TEXT_CHARS = 12
+//   _STATUS_VISIBLE_TEXT_CHARS = 10
 //   _STATUS_SCROLL_INTERVAL_MS = 500
-//   _STATUS_ITEM_WIDTH         = 155.0
+//   _STATUS_ITEM_WIDTH         = 130.0
 //   _STATUS_SCROLL_GAP         = "   "
 
 @MainActor
@@ -17,10 +17,10 @@ public final class StatusItemManager {
 
     // MARK: - Constants
 
-    private static let visibleChars    = 12
+    private static let visibleChars    = 10
     private static let scrollIntervalS = 0.5
     private static let scrollGap       = "   "
-    private static let itemWidth: CGFloat = 155.0
+    private static let itemWidth: CGFloat = 130.0
 
     // MARK: - State
 
@@ -41,6 +41,8 @@ public final class StatusItemManager {
         self.controller = controller
         guard statusItem == nil else { return }
         let item = NSStatusBar.system.statusItem(withLength: Self.itemWidth)
+        item.button?.font = NSFont.monospacedSystemFont(ofSize: NSFont.systemFontSize, weight: .regular)
+        item.button?.isHidden = true
         item.button?.target = self
         item.button?.action = #selector(buttonClicked(_:))
         item.button?.sendAction(on: [.leftMouseUp, .rightMouseUp])
@@ -101,12 +103,12 @@ public final class StatusItemManager {
             let window  = String(chars[start..<(start + Self.visibleChars)])
             return "\(prefix) \(window)"
         }
-        return "\(prefix) \(text)"
+        return "\(prefix) \(padToVisibleLength(text))"
     }
 
     private func formatTooltip(track: Track) -> String {
         var parts = [track.title.trimmingCharacters(in: .whitespaces)]
-        let artist = track.artist.trimmingCharacters(in: .whitespaces)
+        let artist = displayArtist(for: track)
         let album  = track.album.trimmingCharacters(in: .whitespaces)
         if !artist.isEmpty { parts.append(artist) }
         if !album.isEmpty  { parts.append(album)  }
@@ -115,13 +117,28 @@ public final class StatusItemManager {
 
     private func baseText(track: Track) -> String {
         let title  = track.title.trimmingCharacters(in: .whitespaces)
-        let artist = track.artist.trimmingCharacters(in: .whitespaces)
+        let artist = displayArtist(for: track)
         return artist.isEmpty ? title : "\(title) - \(artist)"
+    }
+
+    private func displayArtist(for track: Track) -> String {
+        let artist = track.artist.trimmingCharacters(in: .whitespaces)
+        if !artist.isEmpty { return artist }
+        return track.artists
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+            .joined(separator: ", ")
+    }
+
+    private func padToVisibleLength(_ text: String) -> String {
+        let missing = Self.visibleChars - text.count
+        guard missing > 0 else { return text }
+        return text + String(repeating: " ", count: missing)
     }
 
     private func scrollKeyFor(_ track: Track?) -> String {
         guard let t = track else { return "" }
-        return "\(t.platform):\(t.id):\(t.title):\(t.artist)"
+        return "\(t.platform):\(t.id):\(t.title):\(displayArtist(for: t))"
     }
 
     // MARK: - Scroll timer

@@ -29,6 +29,7 @@ public final class MacOSMediaHandler {
     public func setup(controller: AppController) {
         self.controller = controller
         registerRemoteCommands()
+        setupStatusItem()
     }
 
     // MARK: - Full update (track change, play/pause, seek)

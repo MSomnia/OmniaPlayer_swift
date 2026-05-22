@@ -33,6 +33,11 @@ xcuserdata/
 *.a
 *.dylib
 *.dSYM/
+/build-local/
+
+# Tests
+/Tests/
+/tests/
 
 # Logs
 *.log

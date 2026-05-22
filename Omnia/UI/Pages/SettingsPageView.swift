@@ -16,14 +16,10 @@ public struct SettingsPageView: View {
 
     // Playback
     @State private var volumeValue: Double = 70
-    @State private var coverRotation: Bool = true
 
     // Interface
     @State private var backgroundPathField: String = ""
     @State private var pureBlackBackground: Bool = false
-
-    // Update
-    @State private var isCheckingUpdate: Bool = false
 
     public init(ctrl: AppController) {
         self.ctrl = ctrl
@@ -260,31 +256,6 @@ public struct SettingsPageView: View {
             .background(Theme.bgElevated)
             .clipShape(RoundedRectangle(cornerRadius: Theme.radiusMD))
 
-            // Cover rotation
-            HStack(spacing: 12) {
-                Image(systemName: "arrow.triangle.2.circlepath")
-                    .font(.system(size: Theme.fontSM))
-                    .foregroundStyle(Theme.secondaryText)
-                    .frame(width: 16)
-
-                Text("封面旋转动画")
-                    .font(Theme.font(Theme.fontMD))
-                    .foregroundStyle(Theme.primaryText)
-
-                Spacer()
-
-                Toggle("", isOn: $coverRotation)
-                    .toggleStyle(.switch)
-                    .tint(Theme.accent)
-                    .labelsHidden()
-                    .onChange(of: coverRotation) { val in
-                        Task { await ctrl.saveSetting(key: "cover_rotation", value: val ? "true" : "false") }
-                    }
-            }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 10)
-            .background(Theme.bgElevated)
-            .clipShape(RoundedRectangle(cornerRadius: Theme.radiusMD))
         }
     }
 
@@ -355,13 +326,58 @@ public struct SettingsPageView: View {
     // MARK: - Section: Update
 
     private var updateSection: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        let isCheckingUpdate = ctrl.updateStatus?.isChecking == true
+
+        return VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 12) {
+                Image(systemName: "info.circle.fill")
+                    .font(.system(size: Theme.fontSM))
+                    .foregroundStyle(Theme.secondaryText)
+                    .frame(width: 16)
+
+                Text("当前版本")
+                    .font(Theme.font(Theme.fontMD))
+                    .foregroundStyle(Theme.primaryText)
+
+                Spacer()
+
+                Text(ctrl.appVersionText)
+                    .font(Theme.font(Theme.fontSM, weight: .medium))
+                    .foregroundStyle(Theme.secondaryText)
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 10)
+            .background(Theme.bgElevated)
+            .clipShape(RoundedRectangle(cornerRadius: Theme.radiusMD))
+
+            HStack(spacing: 12) {
+                Image(systemName: "link.circle.fill")
+                    .font(.system(size: Theme.fontSM))
+                    .foregroundStyle(Theme.secondaryText)
+                    .frame(width: 16)
+
+                Text("发布页")
+                    .font(Theme.font(Theme.fontMD))
+                    .foregroundStyle(Theme.primaryText)
+
+                Spacer()
+
+                Text(ctrl.updateSourceText)
+                    .font(Theme.font(Theme.fontXS))
+                    .foregroundStyle(Theme.secondaryText)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .frame(maxWidth: 360, alignment: .trailing)
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 10)
+            .background(Theme.bgElevated)
+            .clipShape(RoundedRectangle(cornerRadius: Theme.radiusMD))
+
             HStack(spacing: 12) {
                 Button {
-                    isCheckingUpdate = true
                     Task {
                         await ctrl.checkForUpdate()
-                        isCheckingUpdate = false
                     }
                 } label: {
                     HStack(spacing: 6) {
@@ -383,17 +399,37 @@ public struct SettingsPageView: View {
                 .padding(.vertical, 8)
                 .background(Theme.bgElevated)
                 .clipShape(RoundedRectangle(cornerRadius: Theme.radiusMD))
-                .disabled(isCheckingUpdate)
+                .disabled(isCheckingUpdate || !ctrl.canCheckForUpdates)
+
+                if ctrl.updateStatus?.available == true {
+                    Button("前往 GitHub 下载") {
+                        Task { await ctrl.applyUpdate() }
+                    }
+                    .font(Theme.font(Theme.fontMD, weight: .medium))
+                    .foregroundStyle(Theme.bgBase)
+                    .buttonStyle(.plain)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 8)
+                    .background(Theme.accent)
+                    .clipShape(RoundedRectangle(cornerRadius: Theme.radiusMD))
+                }
 
                 Spacer()
             }
 
             if let status = ctrl.updateStatus {
                 HStack(spacing: 8) {
-                    if status.available {
+                    if status.isChecking {
+                        ProgressView()
+                            .scaleEffect(0.7)
+                            .frame(width: 14, height: 14)
+                        Text("正在检查更新…")
+                            .font(Theme.font(Theme.fontSM))
+                            .foregroundStyle(Theme.secondaryText)
+                    } else if status.available {
                         Image(systemName: "arrow.up.circle.fill")
                             .foregroundStyle(Theme.accent)
-                        Text("有新版本可用：\(status.remoteShort)")
+                        Text("GitHub 有新版本：\(status.remoteShort)")
                             .font(Theme.font(Theme.fontSM))
                             .foregroundStyle(Theme.accent)
                     } else if let err = status.error {
@@ -482,6 +518,6 @@ public struct SettingsPageView: View {
     }
 
     private var appVersion: String {
-        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0"
+        ctrl.appVersionText
     }
 }
